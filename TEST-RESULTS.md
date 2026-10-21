@@ -1832,3 +1832,60 @@ three non-default deblocking requests as the previous record.
 
 `meson test` is 17/17 ( `prime-import` added to the CI inventory) and
 `sh test/run-static-checks.sh` passes.
+
+## Encode timestamps across IDR pictures (2026-10-22)
+
+Source `92cf5e1`, driver `build/src/v4l2_drv_video.so` SHA-256
+`aefa2342228a4c4c084db8ef0b60afa5d30cfcbb1d45381a9fbe436750f5fc05`
+(deployed from tracked-source SHA-256
+`a42b2f4477c628e1fafff8e33ac98d332de61656570d515ee6ade4a2d94765d0`,
+provenance `source_dirty=false`), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, module SHA-256
+`4e29b74df8c9475f1b4ba4de5dc6aa34d90cb224a935459d6b5168c4590c822a`,
+boot ID `32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree
+only, no installed package. Nodes resolved by the `iris_driver` QUERYCAP
+name: `/dev/video0` (`Iris Decoder`), `/dev/video1` (`Iris Encoder`).
+
+The encoder wedged at the first GOP-boundary IDR on every stream whose
+rate was not 30 or 31 fps. `h264_vaapi` at 24 fps with `-g 60` stopped
+after picture 61 with `endPicture: encoder produced no access unit`; at
+24 fps with `-g 30`, after 31; at 24 fps with `-g 120`, after 121; 15, 25,
+29, 48 and 60 fps failed the same way, while 30 and 31 fps ran to 300
+frames. Size (640x360 too), codec (HEVC too) and rate control (CQP too)
+made no difference, and the failure reproduced on the committed baseline
+`2f99c2a1`.
+
+Cause, from the frame trace: FFmpeg sends `VAEncMiscParameterFrameRate`
+only with IDR pictures — its global parameters go out with IDR
+(`vaapi_encode.c`, `base_pic->type == FF_HW_PICTURE_TYPE_IDR`). The driver
+derived each picture's timestamp from that picture's own rate, so the
+sequence read `… 333333, 458333 (IDR), 400000 …` at 24 fps: forward on
+the IDR, backwards on the picture after it. The firmware stops returning
+access units once a timestamp goes backwards. A fixed 30 fps fallback
+applied to every non-IDR picture is what made exactly 30/31 fps and the
+intra-only (`-g 0`, `intra_period = 0`) case pass. Two levers ruled out
+the alternatives on the target: skipping `S_PARM` changed nothing, and any
+strictly rising timestamp sequence passed even with a 1 ms step.
+
+The session now fixes its rate at `configure()` (also the only point
+`S_PARM` can change) and advances one frame duration per picture.
+
+| Rate | GOP | Frames | IDRs | Encode | Decode |
+| --- | --- | --- | --- | --- | --- |
+| 24 | 60 | 300 | 5 | ok | ok |
+| 24 | 30 | 120 | 4 | ok | ok |
+| 25 | 50 | 150 | 3 | ok | ok |
+| 30 | 60 | 300 | 5 | ok | ok |
+| 60 | 60 | 240 | 4 | ok | ok |
+
+1920x1080 `testsrc2`, `-b:v 4M`, Annex-B, 12,448,657 bytes for the
+24 fps/300-frame case; every stream decodes with `ffmpeg -i … -f null -`
+and no error. Iris IRQ delta over the five runs: 2266. Earlier on the
+same tree: `sintel-1080p30-h264-b3.mp4` at 24 fps (~720 frames) encoded
+whole, and 24 fps HEVC and 24 fps CBR also ran to completion.
+
+`test/unit/encode-session-test.cc` submits FFmpeg's pattern — rate on
+picture 0 and on the IDR, nothing in between — and requires strictly
+rising timestamps; the old formula fails it (`FAIL: timestamps rise across
+an IDR that carries the frame rate`). `meson test` is 17/17 and
+`sh test/run-static-checks.sh` passes.
