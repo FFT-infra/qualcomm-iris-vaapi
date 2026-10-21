@@ -1721,7 +1721,31 @@ dependent slice segments). `test/unit/encode-session-test.cc` is new: a
 scripted encoder node with and without the loop-filter controls, which
 pins both halves of the deblocking promise — the three control writes with
 their HEVC menu mapping, and the refusal when the controls are absent, plus
-"changing deblocking mid-context needs a new context". It is
-hardware-independent, so the refusal path is verified there rather than on
-the target: no VA client on this tablet asks for non-default deblocking.
-`meson test` is 16/16 and `sh test/run-static-checks.sh` passes.
+"changing deblocking mid-context needs a new context". `meson test` is
+16/16 and `sh test/run-static-checks.sh` passes.
+
+The refusal path is on the target as well, since no VA client there asks
+for non-default deblocking and FFmpeg cannot be made to.
+`test/iris-encode-control-probe.cc` (built, not registered as a meson
+test: it needs the node) drives `EncoderSession` against the real encoder
+node. Resolved by driver name, `/dev/video1`:
+
+```
+control h264_loop_filter_mode    absent
+control h264_loop_filter_alpha   absent
+control h264_loop_filter_beta    absent
+control hevc_loop_filter_mode    absent
+control hevc_lf_tc_offset_div2   absent
+control hevc_lf_beta_offset_div2 absent
+PASS h264: the kernel default deblocking request configures
+PASS hevc: mode 2 configures (the request FFmpeg's zeroed slice parameters normalise to)
+PASS h264: disabling deblocking is refused
+PASS h264: a deblocking offset is refused
+PASS hevc: disabling deblocking is refused
+PASS node=/dev/video1 loop_filter_controls=absent h264_off=0x14 h264_alpha=0x14 hevc_off=0x14
+```
+
+`0x14` is `VA_STATUS_ERROR_UNIMPLEMENTED`. The probe expects that status
+when the node reports the controls absent and success when it reports them
+present, so it is a gate on either kind of kernel, and it configures and
+tears down four real sessions on the way (STOP, drain, STREAMOFF).

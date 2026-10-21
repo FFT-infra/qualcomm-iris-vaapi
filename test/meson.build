@@ -16,6 +16,16 @@ executable(
   'iris-import-probe.cc',
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: it needs the
+# encoder node. Answers whether the loop-filter controls exist and whether a
+# deblocking request the firmware cannot honour is refused, which is the §10
+# invariant 13 gate a scripted node cannot give a verdict on.
+executable(
+  'iris-encode-control-probe',
+  'iris-encode-control-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
 # Parameter-set bitstream round trips for the HEVC translator.
 hevc_parameter_sets_test = executable(
   'hevc-parameter-sets-test',
