@@ -174,9 +174,13 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
         trace_("encode control missing name=prepend-spspps-to-idr");
 
     // CAPTURE carries the frame rate the firmware rates against; OUTPUT
-    // carries the operating rate, which only affects clocking.
-    device_->set_frame_rate(Queue::Capture, params.frame_rate_num, params.frame_rate_den);
-    device_->set_frame_rate(Queue::Output, params.frame_rate_num, params.frame_rate_den);
+    // carries the operating rate, which only affects clocking. One rate is
+    // fixed for the session because S_PARM cannot change while streaming;
+    // the per-picture timestamps advance on the same value.
+    rate_num_ = params.frame_rate_num ? params.frame_rate_num : 30;
+    rate_den_ = params.frame_rate_den ? params.frame_rate_den : 1;
+    device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
+    device_->set_frame_rate(Queue::Output, rate_num_, rate_den_);
 
     // Iris sizes coded buffers from the current rate-control controls. A
     // format set before them keeps the buffered-RC size, and queueing then
@@ -339,11 +343,18 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
     apply_dynamic(params);
 
     // The device layer takes microseconds and the encoder echoes the value
-    // into the access unit. Derive it from the frame rate rather than a
-    // counter: frame N starts N frame durations in, never at zero.
-    const unsigned rate_num = params.frame_rate_num ? params.frame_rate_num : 30;
-    const unsigned rate_den = params.frame_rate_den ? params.frame_rate_den : 1;
-    const uint64_t timestamp_us = (frames_ + 1) * 1000000ull * rate_den / rate_num;
+    // into the access unit. Advance by one frame duration per picture rather
+    // than recomputing from the current picture's rate: FFmpeg sends
+    // VAEncMiscParameterFrameRate only with IDR pictures (the global
+    // parameters go with IDR in vaapi_encode.c), so a per-picture rate jumped
+    // forward on every IDR and back on the picture after it. The firmware
+    // stops returning access units once a timestamp goes backwards, which
+    // wedged the session right after each GOP boundary at every rate but the
+    // 30 fps fallback. The session rate is fixed in configure(), so this sum
+    // only ever rises.
+    const uint64_t frame_us = std::max<uint64_t>(1, 1000000ull * rate_den_ / rate_num_);
+    timestamp_us_ += frame_us;
+    const uint64_t timestamp_us = timestamp_us_;
 
     const Clock::time_point limit = deadline();
     if (free_output_.empty())

@@ -52,9 +52,10 @@ public:
     void configure(const EncodeParams& params, unsigned width, unsigned height);
     // Queue `dmabuf_fd` as one raw frame, wait for its access unit, and
     // return the completion. Safe to call from one thread; the session
-    // mutex serialises a stray second caller. The V4L2 timestamp is derived
-    // from the frame rate: the firmware echoes it, and a bogus delta must
-    // not reach anything that paces on timestamps.
+    // mutex serialises a stray second caller. The V4L2 timestamp advances by
+    // one frame duration of the session rate on every picture: the firmware
+    // echoes it, and it stops producing access units if the sequence ever
+    // goes backwards.
     EncodeResult encode(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params);
     // STOP, drain the tail, STREAMOFF, REQBUFS(0). Idempotent.
     void finish();
@@ -90,6 +91,11 @@ private:
     std::vector<CaptureSlot> capture_;
     std::deque<unsigned> free_output_;
     unsigned frames_ = 0;
+    // Session frame rate, fixed in configure(), and the timestamp of the
+    // last submitted picture.
+    unsigned rate_num_ = 30;
+    unsigned rate_den_ = 1;
+    uint64_t timestamp_us_ = 0;
     // One transaction at a time; also keeps finish() from tearing the queues
     // down under an encode that is still waiting for a completion.
     std::mutex mutex_;

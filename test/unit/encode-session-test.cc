@@ -196,11 +196,13 @@ public:
 
     int allocate_dmabuf(unsigned) override { return -1; }
 
-    void queue_buffer_dmabuf(iris::Queue queue, unsigned index, int, unsigned, unsigned, uint64_t, uint32_t) override
+    void queue_buffer_dmabuf(iris::Queue queue, unsigned index, int, unsigned, unsigned, uint64_t timestamp_us,
+        uint32_t) override
     {
         // One raw frame in, one access unit out, and the input buffer comes
         // back — the transaction the session expects from a real node.
         if (queue == iris::Queue::Output) {
+            timestamps_.push_back(timestamp_us);
             staged_.push_back(iris::Dequeued { 0, 0, 0, kPayload, 0 });
             returned_.push_back(index);
         }
@@ -230,6 +232,10 @@ public:
         frame_rate_den_ = den;
     }
 
+    const std::vector<uint64_t>& timestamps() const { return timestamps_; }
+    unsigned frame_rate_num() const { return frame_rate_num_; }
+    unsigned frame_rate_den() const { return frame_rate_den_; }
+
     void subscribe(uint32_t) override { }
     iris::Event dequeue_event() override { return iris::Event::None; }
     bool decoder_command(uint32_t) override { return true; }
@@ -257,6 +263,7 @@ private:
     std::vector<std::vector<uint8_t>> capture_;
     std::vector<iris::Dequeued> staged_;
     std::vector<unsigned> returned_;
+    std::vector<uint64_t> timestamps_;
     uint32_t codec_ = V4L2_PIX_FMT_H264;
     uint32_t raw_ = 0;
     unsigned width_ = 1920, height_ = 1080;
@@ -409,6 +416,48 @@ void test_change_needs_a_new_context()
     session.finish();
 }
 
+// FFmpeg sends VAEncMiscParameterFrameRate only with IDR pictures: its global
+// parameters go out with IDR (vaapi_encode.c). A timestamp derived from each
+// picture's own rate therefore jumps forward at an IDR and back on the
+// picture after it, and the firmware stops returning access units once a
+// timestamp goes backwards. The session keeps the rate it configured with and
+// advances one frame duration per picture.
+void test_timestamps_never_go_backwards()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    iris::EncodeParams with_rate = params(0, 0, 0);
+    with_rate.frame_rate_num = 24;
+    with_rate.frame_rate_den = 1;
+    check(status_of([&] { session.configure(with_rate, 1920, 1080); }) == -1, "24 fps configures");
+    check(raw->frame_rate_num() == 24 && raw->frame_rate_den() == 1, "S_PARM carries the session rate");
+
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    // Pictures 1..9 and 11 carry no FrameRate misc, the way FFmpeg encodes
+    // them; picture 0 and the IDR at picture 10 do.
+    std::vector<iris::EncodeParams> stream(12, params(0, 0, 0));
+    stream[0] = with_rate;
+    stream[10] = with_rate;
+    for (const iris::EncodeParams& picture : stream) {
+        const iris::EncodeResult result = session.encode(fd, kCaptureSlot, picture);
+        check(result.bytes.size() == kPayload, "every picture returns its access unit");
+    }
+
+    const std::vector<uint64_t>& submitted = raw->timestamps();
+    bool rising = submitted.size() == stream.size();
+    for (size_t i = 1; rising && i < submitted.size(); ++i)
+        rising = submitted[i] > submitted[i - 1];
+    check(rising, "timestamps rise across an IDR that carries the frame rate");
+    session.finish();
+}
+
 } // namespace
 
 int main()
@@ -416,6 +465,7 @@ int main()
     test_default_without_controls();
     test_control_values();
     test_change_needs_a_new_context();
+    test_timestamps_never_go_backwards();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;
