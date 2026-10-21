@@ -27,6 +27,12 @@ project('libva-v4l2', ['cpp', 'c'],
 	# its .git directory, and a hard failure here blocks the build entirely.
 	version: run_command(['sh', '-c', 'git rev-parse --short HEAD 2>/dev/null || echo unknown'],
 		check: true).stdout().strip(),
+	# Meson's own default is -O0, and the translator is a per-frame
+	# bit-level parser, so that default costs an order of magnitude in CPU
+	# per frame: 1080p HEVC measured 6.6 s per 300 frames at -O0 against
+	# 0.45 s at -O2 (TEST-RESULTS.md). Optimise by default; debugoptimized
+	# keeps assertions and symbols for the hardware gates.
+	default_options: ['buildtype=debugoptimized'],
 	meson_version: '>= 0.56.0')
 
 cc = meson.get_compiler('cpp')
