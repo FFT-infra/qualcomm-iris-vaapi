@@ -102,6 +102,11 @@ LIBVA_DRIVERS_PATH=$PWD/build/src LIBVA_DRIVER_NAME=v4l2 vainfo   # 或者先这
 `scripts/uninstall-system.sh` 按安装清单把这种安装撤掉。实验室里的完整流程见
 [`docs/build-and-deploy.md`](docs/build-and-deploy.md)。
 
+包装好之后其他 VA 客户端不用配，靠的就是那个 `msm_drv_video.so` 链接。唯一的
+例外是 GStreamer：它的 VA 插件维护一份厂商白名单，遇到不认识的驱动直接拒绝，
+所以 `va` 系列元素只有在 `GST_VA_ALL_DRIVERS=1` 时才会注册。这是 GStreamer 的
+门槛，不是驱动的；设上之后 `vah264dec` / `vah265dec` 走的都是 Iris。
+
 ## 它怎么解码
 
 一个所有权模型，三种发布策略，按每个 surface 的客户端行为自动选。CAPTURE
@@ -155,9 +160,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `VA_STATUS_ERROR_INVALID_PARAMETER`。
 - **不支持 10-bit、VP9、AV1 编码。** 编码节点的 OUTPUT 队列只列 NV12 和
   QC08C，HEVC Main10 和 VP9 Profile 2 喂不进去。
-- **只有 Annex-B。** 驱动不声明 packed headers，SPS/PPS 由固件自己写，所以
-  编码 context 没有 extradata。直接输出 `.h264` / `.hevc` 没问题，要封装成
-  MP4 需要再 remux（`ffmpeg -i out.h264 -c copy out.mp4`）。
+- **不声明 packed headers，所以打开编码器时没有 extradata。** SPS/PPS 由固件
+  自己写，驱动不会再把客户端那一份塞进去。FFmpeg 能处理：它报个警告，把参数
+  集留在码流里，再从第一个包提取 `avcC` / `hvcC`，所以直接输出 `.mp4` 是可用的
+  （H.264 的 extradata 43 字节，HEVC 124 字节）。GStreamer 的 VA 编码器要求
+  驱动至少声明一种 packed header，否则直接拒绝，因此 `vah264enc` /
+  `vah265enc` 用不了；FFmpeg 的 `h264_vaapi` / `hevc_vaapi` 可以。
 - **一个 context 同时只编一张图。** `vaEndPicture` 同步跑完整个 V4L2 事务，
   VA context 的分辨率又是固定的：换分辨率要新建 context。
 - **不支持 multi-slice、tiles、ROI 和 `-max_frame_size`。** FFmpeg 请求这些

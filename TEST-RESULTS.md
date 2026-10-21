@@ -1542,3 +1542,70 @@ allowed to use it.
 Driver `build-def/src/v4l2_drv_video.so` SHA-256
 `d824cd5624c085ce210fa14f882363afe5dd4c2be3448afbe1e918c71f8d65f3`,
 same kernel and boot ID as above.
+
+## Client coverage and encode scale-out (2026-10-22)
+
+Every run here used a staged install of the driver
+(`DESTDIR=… IRIS_VA_DRIVER_DIR=/usr/lib64/dri scripts/install-system.sh
+build-def`), which is also the only way the `msm_drv_video.so` alias exists.
+`LIBVA_DRIVER_NAME` was unset throughout, so libva had to resolve the driver
+by DRM name the way a client that knows nothing about this project does.
+Driver SHA-256 `d824cd5624c085ce210fa14f882363afe5dd4c2be3448afbe1e918c71f8d65f3`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`.
+
+### Clients that set no environment
+
+| Client | Command shape | Result |
+| --- | --- | --- |
+| FFmpeg | `-hwaccel vaapi -hwaccel_device /dev/dri/renderD128` | decodes; used for every earlier row |
+| Chrome 152 | `test/iris-browser-acceptance.sh --driver …/build-def/src/v4l2_drv_video.so` | H.264 600 frames / 2 dropped, HEVC 600 / 2, `VaapiVideoDecoder`, platform=true, GPU process holding the node |
+| mpv v0.41 | `--hwdec=vaapi --vo=gpu --gpu-context=wayland`, desktop session | `Using hardware decoding (vaapi)`, 60 frames, 65 capture tokens; libva opened `msm_drv_video.so` and found our init function |
+| VLC 3.0.24 | `cvlc --avcodec-hw=vaapi --vout=dummy`, desktop session | `Using Qualcomm Iris V4L2 stateful (libva-v4l2) for hardware decoding`, 60 frames, 61 capture tokens |
+| GStreamer 1.28.8 | `filesrc ! qtdemux ! h264parse ! vah264dec ! fakesink` | H.264 100 frames / 101 capture tokens, HEVC 100 / 102 |
+
+Two client-side gates are worth recording, because neither is visible from
+the driver:
+
+- GStreamer's VA plugin rejects any driver whose vendor string is not on its
+  allow-list (`_gst_va_display_filter_driver`, `gstvadisplay.c:186`), and the
+  `va` plugin then registers zero elements. `GST_VA_ALL_DRIVERS=1` overrides
+  it; with that set, `vah264dec`/`vah265dec` appear and decode through Iris.
+- GStreamer's VA **encoder** cannot start without
+  `VAConfigAttribEncPackedHeaders` at all: `gst_va_display_get_packed_headers`
+  fails, `_init_packed_headers` returns FALSE, and `gst_va_base_enc_reset`
+  reports "Error at reconfiguration error" before any frame is submitted.
+  This driver answers `VA_ATTRIB_NOT_SUPPORTED` there on purpose — the
+  firmware writes SPS/PPS and the driver will not put a second, possibly
+  disagreeing set in the stream. `vah264enc`/`vah265enc` therefore do not
+  work. Radxa's backend answers `VA_ENC_PACKED_HEADER_NONE`, which fails the
+  same check, so this is not a gap against piano.
+
+### MP4 without a remux
+
+The earlier note that MP4 output needs a remux was wrong. FFmpeg warns
+("No global header will be written") and then carries the parameter sets
+in-band, extracting them from the first packet: a 120-frame 1280x720 encode
+yields `extradata_size=43` for H.264 and `124` for HEVC, and both MP4 files
+decode cleanly with no remux. The CQP path (no `-b:v`) behaves the same.
+
+### Encode throughput, 4K, and two contexts at once
+
+300 frames of `testsrc2`, CBR 12 Mbps, `-g 60`, NV12 uploaded from system
+memory, `ffmpeg -benchmark`:
+
+| Codec | 1920x1080 | 3840x2160 |
+| --- | --- | --- |
+| H.264 High | 1.872 s, 160 fps | 3.057 s, 98 fps |
+| HEVC Main | 1.374 s, 218 fps | 2.816 s, 107 fps |
+
+Every output decodes with no errors, and the IDRs land at
+0/60/120/180/240 at both sizes. The 4K H.264 stream reports level 5.1 and
+HEVC level 5.0, which is the encoder's choice for that geometry, not a
+client request.
+
+Two encodes in parallel on one node (H.264 8 Mbps at 1080p and HEVC 8 Mbps
+at 1080p, 300 frames each) both exit 0, produce 19,933,115 and 19,914,057
+bytes, decode cleanly, and move the Iris IRQ counter by 1,154 during the
+pair. The session serialises each context internally; nothing in the two
+runs reported a timeout or a dropped picture.

@@ -114,6 +114,12 @@ LIBVA_DRIVERS_PATH=$PWD/build/src LIBVA_DRIVER_NAME=v4l2 vainfo   # or just try 
 manifest. Details of the lab workflow are in
 [`docs/build-and-deploy.md`](docs/build-and-deploy.md).
 
+Other VA clients need no configuration once the package is installed, because
+of the `msm_drv_video.so` alias. One exception: GStreamer's VA plugin keeps a
+vendor allow-list and refuses an unknown driver, so the `va` elements only
+register with `GST_VA_ALL_DRIVERS=1`. That is GStreamer's gate, not the
+driver's; with it set, `vah264dec` and `vah265dec` decode through Iris.
+
 ## How it decodes
 
 One ownership model with three publish policies, chosen per surface from the
@@ -180,10 +186,13 @@ publishing. The contract, the state machine and the trace vocabulary are in
   `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.
 - **No 10-bit, VP9 or AV1 encode.** The encoder OUTPUT queue enumerates NV12
   and QC08C only, so HEVC Main10 and VP9 Profile 2 cannot be fed.
-- **Annex-B only.** The driver advertises no packed headers and the firmware
-  writes SPS/PPS itself, so an encode context has no extradata. Raw `.h264`
-  or `.hevc` output works; muxing to MP4 needs a remux
-  (`ffmpeg -i out.h264 -c copy out.mp4`).
+- **No packed headers, so no extradata at open time.** The firmware writes
+  SPS/PPS itself and the driver refuses to echo a second set. FFmpeg copes:
+  it warns, carries the parameter sets in-band, and extracts `avcC`/`hvcC`
+  from the first packet, so `.mp4` output works directly (43 bytes of
+  extradata for H.264, 124 for HEVC). GStreamer's VA encoder is stricter and
+  refuses a driver that advertises no packed headers at all, so `vah264enc`
+  and `vah265enc` do not work; FFmpeg's `h264_vaapi`/`hevc_vaapi` do.
 - **One picture per context at a time.** `vaEndPicture` runs the whole V4L2
   transaction, and a VA context has a fixed geometry: changing resolution
   needs a new context.
