@@ -1638,3 +1638,13 @@ the layout difference, and the hashes agree frame for frame:
 "VA decode failed" line in this recheck first hit. No driver change was
 needed. Use normalised output when comparing hashes across decoders; a
 raw framemd5 compares frame layouts as much as pixels.
+
+### Encoder control surface, rechecked (2026-10-22)
+
+`v4l2-ctl -d /dev/video1 --list-ctrls` on the running module lists the GOP
+size, `video_bitrate_mode` (VBR/CBR), the frame-level RC switch, the
+sequence-header mode, the LTR controls and the H.264/HEVC profile, level and
+QP controls. It lists no `force_key_frame`, no RAP control and no
+`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. On-demand IDR therefore stays
+unimplemented: the driver has nothing to write, and `intra_refresh_period`
+is a different feature (periodic intra refresh, not an IDR request).

@@ -247,6 +247,17 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
   sizes the coded queue from the current controls, so `configure` re-sets
   the CAPTURE format after the controls and before `REQBUFS`; a format set
   earlier leaves buffers that `QBUF` rejects with `EINVAL` at 1080p.
+- `VAConfigAttribEncPackedHeaders` stays `VA_ATTRIB_NOT_SUPPORTED`. The
+  firmware writes SPS/PPS and the encoder node has no path that accepts a
+  client's parameter sets, so advertising the attribute would promise to
+  honour buffers the driver can only ignore. FFmpeg tolerates it and still
+  extracts `avcC`/`hvcC` from the first packet; GStreamer's VA encoder
+  refuses to start at all, which is the price of not advertising. Anything
+  that does need packed headers is a separate change with its own evidence.
+- The running SM8550 module exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`
+  (`v4l2-ctl -d <encoder> --list-ctrls` shows the GOP size and the QP
+  controls, no key-frame request), so on-demand IDR is not implemented
+  rather than pending.
 - An OUTPUT `QBUF` with `bytesused == 0` is rejected and poisons the
   instance, so the session passes the plane length.
 - The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
