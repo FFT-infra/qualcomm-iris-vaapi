@@ -1889,3 +1889,51 @@ picture 0 and on the IDR, nothing in between — and requires strictly
 rising timestamps; the old formula fails it (`FAIL: timestamps rise across
 an IDR that carries the frame rate`). `meson test` is 17/17 and
 `sh test/run-static-checks.sh` passes.
+
+## On-demand IDR by moving the intra period (2026-10-22)
+
+Source `9c29972`, driver `build/src/v4l2_drv_video.so` SHA-256
+`573fd238dbf72fbc0cea229cd517ec3b0d847cc1c159208375821607175be753`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree only, no
+installed package, `source_dirty=false`. 1280x720 at 24 fps, `-g 60`,
+`-b:v 4M`, `-force_key_frames` from FFmpeg, decoded with
+`ffmpeg -i … -f null -`.
+
+| Request | IDR positions in the stream | Frames | Result |
+| --- | --- | --- | --- |
+| none | 0, 60, 120 | 130 | ok |
+| `eq(n,24)` | 0, 24, 84 | 130 | ok |
+| `eq(n,10)+eq(n,40)` | 0, 10, 40, 100 | 130 | ok |
+| `gte(t,n_forced*1)` | 0, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288 | 300 | ok |
+| `eq(n,60)` (the firmware's own boundary) | 0, 60, 120 | 130 | ok |
+
+Iris IRQ delta over the five runs: 1687. Every stream decodes without
+error.
+
+Three variants were measured and two of them are wrong, which is why the
+session looks the way it does:
+
+- **Restoring the period after the picture completes** puts the following
+  picture at the head of a fresh GOP, so `eq(n,24)` produced `0 24 25`
+  instead of `0 24`. The period has to be back before the picture is
+  queued.
+- **Skipping the lever at positions the firmware would make IDRs itself**
+  (first picture, GOP boundary) made the driver's idea of the schedule
+  drift from the firmware's: with a one-second request the stream came out
+  `0 24 48 72 96 144 168 …`, and the requests at 120 and 240 became
+  ordinary pictures — silently dropped keyframes, which is worse than an
+  extra control write.
+- **Never restoring the period** makes every following picture an IDR
+  (`0 24 25 26 … 299`).
+- Levering on *every* requested picture, including at the firmware's own
+  boundary, never drops one. The boundary case produces `0 60 120`: a
+  requested IDR there is already an IDR, so the request is satisfied, and
+  the next automatic boundary moves accordingly.
+
+The schedule therefore re-anchors on each requested IDR, the way x264 and
+libx265 do. `test/unit/encode-session-test.cc` pins the lever, the
+restore-before-queue ordering and the intra-only case; removing either
+rule fails it (`FAIL: the period is restored before the picture is
+queued`, `FAIL: a request at the firmware's own GOP boundary writes no
+lever`). `meson test` is 17/17 and `sh test/run-static-checks.sh` passes.
