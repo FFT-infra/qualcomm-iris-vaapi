@@ -1134,8 +1134,9 @@ passes through the driver (RASL pictures after the opening CRA are refused
 by the translator, so the output starts where the reference does) while
 the native GStreamer path emitted one frame fewer. `DELTAQP_A_BRCM_4`,
 `INITQP_B_Main10_Sony_1` and `PMERGE_E_TI_3` complete every frame with no
-firmware error but differ in pixels; they are the residual and were not
-chased further in this phase.
+firmware error but were recorded here as differing in pixels; the recheck
+of 2026-10-22 shows that was a measurement artifact and all three match
+byte for byte (see "HEVC conformance recheck" below).
 
 The HEVC parameter-set unit test is registered again (it had been dropped
 from `test/meson.build` in Phase 3).
@@ -1609,3 +1610,31 @@ at 1080p, 300 frames each) both exit 0, produce 19,933,115 and 19,914,057
 bytes, decode cleanly, and move the Iris IRQ counter by 1,154 during the
 pair. The session serialises each context internally; nothing in the two
 runs reported a timeout or a dropped picture.
+
+### HEVC conformance recheck: all three residuals are exact (2026-10-22)
+
+Phase 7 recorded `DELTAQP_A_BRCM_4`, `INITQP_B_Main10_Sony_1` and
+`PMERGE_E_TI_3` as decoding every frame without a firmware error but
+differing in pixels, and left them unchased. Rechecked on the same target
+with the current driver, they are exact.
+
+The earlier comparison hashed `framemd5` straight out of each decoder. A
+framemd5 is taken over the frame's planes at the decoder's linesize, so a
+padding or stride difference between the VA surface and libavcodec's
+frame changes the hash without changing a pixel: the streams report
+different hashes for every frame, while a contiguous NV12 dump of the
+whole stream is byte-identical. Normalising the software side with
+`-vf format=nv12` and the VA side with `hwdownload,format=nv12` removes
+the layout difference, and the hashes agree frame for frame:
+
+| Vector | Frames | Result |
+| --- | --- | --- |
+| `DELTAQP_A_BRCM_4` (Main, 1920x1088) | 96 | MD5 identical, `nv12` |
+| `PMERGE_E_TI_3` (Main, 416x240) | 8 | MD5 identical, `nv12` |
+| `INITQP_B_Main10_Sony_1` (Main 10, 416x240) | 90 | MD5 identical, `p010le` |
+
+`INITQP_B_Main10_Sony_1` also has to be downloaded as `p010le`: asking for
+`nv12` from a 10-bit surface fails outright, which is what the earlier
+"VA decode failed" line in this recheck first hit. No driver change was
+needed. Use normalised output when comparing hashes across decoders; a
+raw framemd5 compares frame layouts as much as pixels.

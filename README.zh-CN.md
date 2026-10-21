@@ -150,8 +150,6 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- 三个 HEVC 一致性测试向量（`DELTAQP_A_BRCM_4`、`INITQP_B_Main10_Sony_1`、
-  `PMERGE_E_TI_3`）每帧都解完、固件无报错，但像素有差异，还没追。
 - **编码不能按需出 IDR。** 节点没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，
   固件能力表里也没有 RAP 控制项，关键帧只能靠 GOP 长度。从 GOP 中间切开，
   流要等到下一个 IDR 才能播。

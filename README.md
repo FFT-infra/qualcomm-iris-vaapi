@@ -174,9 +174,6 @@ publishing. The contract, the state machine and the trace vocabulary are in
 - **One qualified device.** Everything above was measured on one SM8550
   tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
   packaging is provided but not validated.
-- Three HEVC conformance vectors (`DELTAQP_A_BRCM_4`,
-  `INITQP_B_Main10_Sony_1`, `PMERGE_E_TI_3`) decode every frame without a
-  firmware error but differ in pixels; not chased yet.
 - **Encode has no on-demand IDR.** The node exposes no
   `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` and the firmware capability list has
   no RAP control, so keyframes come from the GOP size only. Cutting a stream
