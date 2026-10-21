@@ -1648,3 +1648,80 @@ QP controls. It lists no `force_key_frame`, no RAP control and no
 `V4L2_CID_MPEG_VIDEO_FRAME_RATE`. On-demand IDR therefore stays
 unimplemented: the driver has nothing to write, and `intra_refresh_period`
 is a different feature (periodic intra refresh, not an IDR request).
+
+## Client requests the encoder cannot honour (2026-10-22)
+
+Source `956fca0` plus this change (uncommitted at the time of the run),
+driver `build/src/v4l2_drv_video.so` SHA-256
+`c2a57b2dc298fda39e79aa69c0a9e4daf1d6eb26d400de759fbbf1e6e95d4b50`
+(deployed from tracked-source SHA-256
+`16fb6107f377ee69e47426b11cd8e06a45ff8d516599899e315de00afa2e0c36`),
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree only, no
+installed package. Decoder and encoder nodes resolved by the `iris_driver`
+QUERYCAP name: `/dev/video0` (`Iris Decoder`), `/dev/video1`
+(`Iris Encoder`).
+
+Two classes of gap against the reference driver (radxa `libva-v4l2`
+1.0.0) closed in one change: a client's slice deblocking request was read
+by nobody, and the other VA picture/slice fields that the firmware cannot
+be told about were ignored silently.
+
+The kernel this target runs exposes **no** loop-filter control on either
+node: `v4l2-ctl -d /dev/video1 --list-ctrls | grep -ciE
+'loop_filter|lf_(tc|beta)'` is 0, and the same holds for the decoder node.
+The firmware there always filters with the default 0/0 offsets, so the
+driver forwards the request when those six controls exist and returns
+`VA_STATUS_ERROR_UNIMPLEMENTED` when they do not — with one exception,
+mode 2 (filtering off across slice boundaries only), which with one slice
+per picture produces the same stream as mode 0 and is therefore accepted.
+Mode 2 is not hypothetical: it is exactly what an HEVC client that leaves
+`slice_loop_filter_across_slices_enabled_flag` clear normalises to, and
+FFmpeg sends zeroed slice parameters, so HEVC encode on this target takes
+that branch. The trace records which one ran:
+
+```
+encode deblocking mode=0 alpha=0 beta=0 via=default t=25     (h264_vaapi)
+encode deblocking mode=2 alpha=0 beta=0 via=default t=21     (hevc_vaapi)
+```
+
+Acceptance re-run on this build, 300 frames each, `V4L2_VA_TRACE=1`:
+
+| Run (1920x1080, 30 fps) | Frames | Bytes | Iris IRQ delta | Key frames |
+| --- | ---: | ---: | ---: | --- |
+| `h264_vaapi`, no bitrate (CQP), `-bf 0 -g 60` | 300 | 17,135,872 | +609 | 0/60/120/180/240 |
+| `hevc_vaapi`, the same | 300 | 13,169,058 | +610 | 0/60/120/180/240 |
+| `h264_vaapi -b:v 4M` (VBR) | 300 | 9,915,972 | — | — |
+| `h264_vaapi -rc_mode CBR -maxrate 4M -profile:v high -level 4.1` | 300 | 4,987,971 | — | — |
+| `h264_vaapi` 1280x720 `-b:v 2M -g 30` | 120 | 1,994,401 | — | — |
+| `hevc_vaapi` 1280x720 `-b:v 2M -g 30` | 120 | 2,010,359 | — | — |
+
+Every output decodes with `ffmpeg -v error -i <out> -f null -`, and the
+two CQP files decode through this driver to 300 frames whose per-frame MD5
+matches a software decode exactly (`hwdownload,format=nv12` on the VA
+side, `format=nv12` on the software side). The CQP byte counts match the
+earlier record to four significant figures (17,138,094 and 13,171,327 on
+the pre-change build), which is what a change that only adds validation
+should look like.
+
+Profiles and the documented failure modes still behave:
+
+| Run (1280x720, 60 frames) | Result |
+| --- | --- |
+| `-profile:v constrained_baseline` | exits 0, 525,430 bytes, `ffprobe`: Constrained Baseline, level 3.1 |
+| `-profile:v main` | exits 0, 522,808 bytes |
+| `-bf 2` | exits 0, 523,190 bytes: FFmpeg clamps to no B frames before the driver sees it |
+| `-slices 2` | fails in FFmpeg with `Invalid argument` before the driver sees it; the driver's own rule is `VA_STATUS_ERROR_UNIMPLEMENTED` for more than one slice |
+| `-q:v 10` (CQP) | exits 0, 2,682,127 bytes for 60 frames |
+
+`test/encode-params-test.cc` covers the translator's side of the refusals
+(weighted prediction, scaling lists, chroma QP offsets, reference indexes,
+a CABAC initialisation index, two slices, HEVC tiles, wavefront and
+dependent slice segments). `test/unit/encode-session-test.cc` is new: a
+scripted encoder node with and without the loop-filter controls, which
+pins both halves of the deblocking promise — the three control writes with
+their HEVC menu mapping, and the refusal when the controls are absent, plus
+"changing deblocking mid-context needs a new context". It is
+hardware-independent, so the refusal path is verified there rather than on
+the target: no VA client on this tablet asks for non-default deblocking.
+`meson test` is 16/16 and `sh test/run-static-checks.sh` passes.

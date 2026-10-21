@@ -32,6 +32,16 @@ encode_params_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-params', encode_params_test)
 
+# The encoder session's control contract on a scripted Iris encoder node:
+# which V4L2 writes a VA deblocking request produces, and what happens on a
+# kernel that has no loop-filter controls at all.
+encode_session_test = executable(
+  'encode-session-test',
+  'unit/encode-session-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('encode-session', encode_session_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.

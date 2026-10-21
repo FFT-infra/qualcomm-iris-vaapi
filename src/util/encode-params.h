@@ -32,6 +32,16 @@ struct EncodeParams {
     int min_qp = -1; // < 0 leaves the firmware default
     int max_qp = -1;
     bool cabac = true; // H.264 only; HEVC is always CABAC
+    // Deblocking, in the numbering both codecs share: 0 filtering enabled,
+    // 1 disabled, 2 disabled across slice boundaries. VA carries these in
+    // the slice header and V4L2 in a per-context control, so only the first
+    // slice can reach the kernel. `alpha` is H.264's alpha_c0 offset and
+    // HEVC's tc offset; `beta` is beta in both. All three are the spec's
+    // div2 values, and the offsets are 0 whenever filtering is off, because
+    // the slice header does not carry them then.
+    int deblock_mode = 0;
+    int deblock_alpha = 0;
+    int deblock_beta = 0;
 };
 
 } // namespace iris

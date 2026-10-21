@@ -258,6 +258,29 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
   (`v4l2-ctl -d <encoder> --list-ctrls` shows the GOP size and the QP
   controls, no key-frame request), so on-demand IDR is not implemented
   rather than pending.
+- Deblocking is a slice header property in VA and a per-context control in
+  V4L2, so `configure_deblocking` reads the first slice and writes
+  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
+  `_LOOP_FILTER_MODE`, `_LF_TC_OFFSET_DIV2`, `_LF_BETA_OFFSET_DIV2`) when
+  the kernel has them. The offsets are dropped when filtering is off, since
+  the slice header does not carry them then. This module has none of the six
+  controls and the firmware always filters with 0/0 offsets, so a non-default
+  request is `VA_STATUS_ERROR_UNIMPLEMENTED`: substituting the default would
+  return a stream the client did not ask for. Mode 2 is the one accepted
+  exception, because it only turns filtering off across slice boundaries and
+  one slice per picture makes it the same stream as mode 0 — an HEVC client
+  that leaves `slice_loop_filter_across_slices_enabled_flag` clear is asking
+  for exactly that and still encodes here. Deblocking cannot change
+  mid-context; a later picture that asks for something else is
+  `UNIMPLEMENTED` too.
+- The same rule covers every other VA picture and slice field the firmware
+  cannot be told about: weighted prediction, picture scaling lists, chroma QP
+  offsets, more than one reference index, a CABAC initialisation index, more
+  than one slice per picture, and on the HEVC side tiles, wavefront coding,
+  dependent slice segments, transquant bypass and CTU bit limits. Each is
+  `VA_STATUS_ERROR_UNIMPLEMENTED`. The codec translators own this list, so
+  it is testable without a node (`test/encode-params-test.cc`), and the
+  reference driver rejects the same set.
 - An OUTPUT `QBUF` with `bytesused == 0` is rejected and poisons the
   instance, so the session passes the plane length.
 - The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
@@ -404,6 +427,7 @@ va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n>
+encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
 encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues)
@@ -424,7 +448,7 @@ ends with a tag. Gates are commands, not opinions.
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
-| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged | (in `feat/encode-entrypoints`) |
+| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce | (in `feat/encode-entrypoints`) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
@@ -470,6 +494,14 @@ holes). Results and the VP9 open failure: TEST-RESULTS.md.
     queue enumerates the codec and its OUTPUT queue enumerates NV12. Both
     lists come from `data/iris-codec-capabilities.json` and the
     `encode-qualified-*` block in `src/va/driver.cc` must match it exactly.
+13. A client request the encoder cannot honour fails with
+    `VA_STATUS_ERROR_UNIMPLEMENTED`, never a stream that quietly used
+    something else. That covers slice deblocking the kernel has no control
+    for, more than one slice per picture, tiles and wavefront coding,
+    weighted prediction, scaling lists, chroma QP offsets and several
+    reference indexes — the firmware writes the sequence headers, owns the
+    reference structure and chooses the quantisation, so none of them can be
+    forwarded. Deblocking additionally cannot change inside a live context.
 
 ## 11. How work is divided
 

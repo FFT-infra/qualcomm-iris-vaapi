@@ -167,7 +167,18 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
 - **一个 context 同时只编一张图。** `vaEndPicture` 同步跑完整个 V4L2 事务，
   VA context 的分辨率又是固定的：换分辨率要新建 context。
 - **不支持 multi-slice、tiles、ROI 和 `-max_frame_size`。** FFmpeg 请求这些
-  会直接报错，不会被静默忽略。
+  会直接报错，不会被静默忽略。驱动自己也守同样的规矩：picture 参数里
+  slice 多于一个、tiles、wavefront 编码、加权预测、scaling list、chroma QP
+  偏移、多个参考帧索引，一律返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。序列头由
+  固件写、参考结构和量化由固件定，交出一段没照做的流比直接失败更糟。
+- **slice 的去块滤波参数要么照做，要么报错。** VA 的 slice 参数是客户端唯一
+  能提出关掉滤波或调偏移量的地方；内核有这个控制项时，驱动把
+  `disable_deblocking_filter_idc`、alpha/beta 转给
+  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA`（HEVC 有对应
+  的 tc/beta）。SM8550 的内核没有这些控制项，固件永远按默认的 0/0 滤波，
+  所以这时任何非默认请求都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，而不是交出
+  一段没照做的流。V4L2 里去块是每个 context 一个值，VA 里是每个 slice 一个
+  值，取值只看第一个 slice，同一个 context 里改动要新建 context。
 
 ## 开发
 

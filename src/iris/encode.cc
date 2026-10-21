@@ -166,6 +166,7 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
     if (params.max_qp >= 0)
         set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_MAX_QP : V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP, params.max_qp,
             "max qp");
+    configure_deblocking(params);
     // Packed headers are not advertised: the firmware writes SPS/PPS itself.
     // Prefixing them to every sync frame is what makes the Annex-B stream
     // decodable from any IDR.
@@ -221,10 +222,71 @@ void EncoderSession::set_frame_qp(int qp)
         "p-frame qp");
 }
 
+void EncoderSession::configure_deblocking(const EncodeParams& params)
+{
+    const bool hevc = config_.codec == V4L2_PIX_FMT_HEVC;
+    // [0] mode, [1] H.264 alpha_c0 / HEVC tc, [2] beta. Both codecs have all
+    // three or none: they came in together with the Iris encoder node.
+    const uint32_t ids[] = {
+        static_cast<uint32_t>(hevc ? V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE
+                                   : V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE),
+        static_cast<uint32_t>(hevc ? V4L2_CID_MPEG_VIDEO_HEVC_LF_TC_OFFSET_DIV2
+                                   : V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_ALPHA),
+        static_cast<uint32_t>(hevc ? V4L2_CID_MPEG_VIDEO_HEVC_LF_BETA_OFFSET_DIV2
+                                   : V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_BETA),
+    };
+    bool supported = true;
+    for (uint32_t id : ids)
+        supported = supported && device_->get_control(id).has_value();
+
+    if (!supported) {
+        // Kernels without the loop-filter controls encode with the
+        // firmware's enabled, 0/0 defaults and nothing else, so a different
+        // request is refused rather than quietly replaced. Mode 2 is the
+        // exception: it only turns filtering off across slice boundaries,
+        // and this driver encodes one slice per picture, where the two modes
+        // produce the same stream.
+        require((params.deblock_mode == 0 || (hevc && params.deblock_mode == 2)) && !params.deblock_alpha
+                && !params.deblock_beta,
+            "deblocking request requires Iris loop-filter controls", VA_STATUS_ERROR_UNIMPLEMENTED);
+        trace_("encode deblocking mode=%d alpha=%d beta=%d via=default", params.deblock_mode,
+            params.deblock_alpha, params.deblock_beta);
+        return;
+    }
+
+    // The H.264 menu values are the idc values; HEVC numbers disabled first.
+    int mode = params.deblock_mode;
+    if (hevc) {
+        switch (params.deblock_mode) {
+        case 1:
+            mode = V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED;
+            break;
+        case 2:
+            mode = V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY;
+            break;
+        default:
+            mode = V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED;
+            break;
+        }
+    }
+    set_control(ids[0], mode, hevc ? "hevc loop filter mode" : "h264 loop filter mode");
+    set_control(ids[1], params.deblock_alpha, hevc ? "hevc loop filter tc" : "h264 loop filter alpha");
+    set_control(ids[2], params.deblock_beta, "loop filter beta");
+    // The firmware may still override the offsets per frame under rate
+    // control; the request is forwarded as asked, not rewritten.
+    trace_("encode deblocking mode=%d alpha=%d beta=%d via=V4L2", params.deblock_mode,
+        params.deblock_alpha, params.deblock_beta);
+}
+
 void EncoderSession::apply_dynamic(const EncodeParams& params)
 {
     // Only the controls the kernel marks CAP_FLAG_DYNAMIC_ALLOWED may be
     // written while the raw queue streams; the rest were set in configure().
+    // Deblocking is one of the rest, and the session is already streaming by
+    // the time a second picture arrives, so a change needs a new context.
+    require(params.deblock_mode == applied_.deblock_mode && params.deblock_alpha == applied_.deblock_alpha
+            && params.deblock_beta == applied_.deblock_beta,
+        "changing deblocking requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     if (params.rate_mode == RateMode::Cqp && params.qp != applied_.qp) {
         set_frame_qp(params.qp);
         applied_.qp = params.qp;

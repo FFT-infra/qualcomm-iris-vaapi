@@ -115,13 +115,65 @@ public:
                 out.frame_rate_den = den;
             }
         }
+        const VAEncSliceParameterBufferHEVC* slice = picture.slices.empty()
+            ? nullptr
+            : static_cast<const VAEncSliceParameterBufferHEVC*>(picture.slices.front());
+        // Deblocking lives in the slice header in VA and in a per-context
+        // control in V4L2, so only the first slice can be forwarded. The
+        // kernel's HEVC menu numbers the modes differently from H.264, so
+        // the request is normalised to H.264's numbering here.
+        if (slice != nullptr) {
+            const uint32_t disabled = slice->slice_fields.bits.slice_deblocking_filter_disabled_flag;
+            require(disabled <= 1, "invalid deblocking request", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // Filtering across slice boundaries is what mode 2 turns off,
+            // and with one slice per picture it selects the same stream as
+            // mode 0.
+            out.deblock_mode = disabled ? 1
+                                        : (slice->slice_fields.bits.slice_loop_filter_across_slices_enabled_flag
+                                                  ? 0
+                                                  : 2);
+            out.deblock_alpha = disabled ? 0 : slice->slice_tc_offset_div2;
+            out.deblock_beta = disabled ? 0 : slice->slice_beta_offset_div2;
+            require(out.deblock_alpha >= -6 && out.deblock_alpha <= 6 && out.deblock_beta >= -6
+                    && out.deblock_beta <= 6,
+                "encode deblocking offsets are out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
+        }
+        // Everything else the client can put in these buffers changes the
+        // coded picture and has no control behind it: the firmware writes the
+        // sequence headers, owns the reference structure and chooses the
+        // quantisation offsets. Returning a stream that ignored the request
+        // is worse than failing, which is also what the reference driver
+        // (radxa libva-v4l2) does.
+        require(!params->pic_fields.bits.tiles_enabled_flag && !params->num_tile_columns_minus1
+                && !params->num_tile_rows_minus1 && !params->pic_fields.bits.entropy_coding_sync_enabled_flag,
+            "tiles and wavefront coding are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(!params->pic_fields.bits.dependent_slice_segments_enabled_flag
+                && !params->pic_fields.bits.weighted_pred_flag
+                && !params->pic_fields.bits.weighted_bipred_flag
+                && !params->pic_fields.bits.transquant_bypass_enabled_flag
+                && !params->pic_fields.bits.scaling_list_data_present_flag,
+            "unsupported HEVC picture features", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(params->pps_cb_qp_offset == 0 && params->pps_cr_qp_offset == 0,
+            "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(params->num_ref_idx_l0_default_active_minus1 == 0 && !params->ctu_max_bitsize_allowed,
+            "reference indexes and CTU bit limits are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
+        if (slice != nullptr) {
+            require(slice->slice_cb_qp_offset == 0 && slice->slice_cr_qp_offset == 0,
+                "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(slice->num_ref_idx_l0_active_minus1 == 0
+                    && !slice->slice_fields.bits.dependent_slice_segment_flag
+                    && !slice->slice_fields.bits.colour_plane_id,
+                "unsupported HEVC slice features", VA_STATUS_ERROR_UNIMPLEMENTED);
+        }
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
         if (out.rate_mode == RateMode::Cqp) {
             int qp = params->pic_init_qp;
-            if (!picture.slices.empty())
-                qp += static_cast<const VAEncSliceParameterBufferHEVC*>(picture.slices.front())->slice_qp_delta;
+            if (slice != nullptr)
+                qp += slice->slice_qp_delta;
             require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.qp = qp;
         }

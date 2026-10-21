@@ -194,7 +194,23 @@ publishing. The contract, the state machine and the trace vocabulary are in
   transaction, and a VA context has a fixed geometry: changing resolution
   needs a new context.
 - **No multi-slice, tiles, ROI or `-max_frame_size`.** FFmpeg fails those
-  requests loudly; they are not silently ignored.
+  requests loudly; they are not silently ignored. The driver has the same
+  rule: more than one slice in the picture parameters, tiles, wavefront
+  coding, weighted prediction, scaling lists, chroma QP offsets and several
+  reference indexes are `VA_STATUS_ERROR_UNIMPLEMENTED`, because the
+  firmware writes the sequence headers, owns the reference structure and
+  picks the quantisation, and a stream that quietly used something else
+  would be worse than a failure.
+- **Slice deblocking is forwarded, or refused.** The VA slice parameters are
+  the client's one chance to ask for filtering to be off or throttled, and
+  the driver forwards them to
+  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (and the HEVC
+  equivalents) when the kernel has them. The SM8550 kernel does not, and
+  there the firmware always filters with the default 0/0 offsets, so any
+  other request fails with `VA_STATUS_ERROR_UNIMPLEMENTED` instead of coming
+  back as a stream that ignores it. Deblocking is per-context in V4L2 and
+  per-slice in VA, so it is read from the first slice and changing it
+  mid-context needs a new context.
 
 ## Development
 

@@ -134,6 +134,44 @@ public:
                 out.frame_rate_den = den;
             }
         }
+        const VAEncSliceParameterBufferH264* slice = picture.slices.empty()
+            ? nullptr
+            : static_cast<const VAEncSliceParameterBufferH264*>(picture.slices.front());
+        // Deblocking lives in the slice header in VA and in a per-context
+        // control in V4L2, so only the first slice can be forwarded.
+        if (slice != nullptr) {
+            require(slice->disable_deblocking_filter_idc <= 2, "invalid deblocking request",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const bool disabled = slice->disable_deblocking_filter_idc == 1;
+            out.deblock_mode = slice->disable_deblocking_filter_idc;
+            out.deblock_alpha = disabled ? 0 : slice->slice_alpha_c0_offset_div2;
+            out.deblock_beta = disabled ? 0 : slice->slice_beta_offset_div2;
+            require(out.deblock_alpha >= -6 && out.deblock_alpha <= 6 && out.deblock_beta >= -6
+                    && out.deblock_beta <= 6,
+                "encode deblocking offsets are out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
+        }
+        // Everything else the client can put in these buffers changes the
+        // coded picture and has no control behind it: the firmware writes the
+        // sequence headers, owns the reference structure and chooses the
+        // quantisation offsets. Returning a stream that ignored the request
+        // is worse than failing, which is also what the reference driver
+        // (radxa libva-v4l2) does.
+        require(!params->pic_fields.bits.weighted_pred_flag && !params->pic_fields.bits.weighted_bipred_idc,
+            "weighted prediction is not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(!params->pic_fields.bits.pic_scaling_matrix_present_flag,
+            "picture scaling lists are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(params->chroma_qp_index_offset == 0 && params->second_chroma_qp_index_offset == 0,
+            "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(params->num_ref_idx_l0_active_minus1 == 0 && params->num_ref_idx_l1_active_minus1 == 0,
+            "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
+        if (slice != nullptr) {
+            require(slice->cabac_init_idc == 0, "a CABAC initialisation index is not supported",
+                VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(slice->num_ref_idx_l0_active_minus1 == 0 && slice->num_ref_idx_l1_active_minus1 == 0,
+                "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        }
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -142,8 +180,8 @@ public:
         // slice covering the picture).
         if (out.rate_mode == RateMode::Cqp) {
             int qp = params->pic_init_qp;
-            if (!picture.slices.empty())
-                qp += static_cast<const VAEncSliceParameterBufferH264*>(picture.slices.front())->slice_qp_delta;
+            if (slice != nullptr)
+                qp += slice->slice_qp_delta;
             require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.qp = qp;
         }

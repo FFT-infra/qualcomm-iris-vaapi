@@ -45,6 +45,18 @@ template <typename Function> bool throws(Function&& body)
     return false;
 }
 
+// The same, reporting the VA status: a rejection asserted only as "it threw"
+// would pass on the wrong error.
+template <typename Function> VAStatus status_of(Function&& body)
+{
+    try {
+        body();
+    } catch (const iris::Error& error) {
+        return error.status;
+    }
+    return static_cast<VAStatus>(-1);
+}
+
 VAEncSequenceParameterBufferH264 h264_sequence()
 {
     VAEncSequenceParameterBufferH264 sequence = {};
@@ -236,6 +248,152 @@ void test_hevc_translation()
     check(throws([&] { main10->translate(input); }), "Main10 encode profile is rejected");
 }
 
+void test_deblocking()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    VAEncSliceParameterBufferH264 slice = {};
+    EncodePicture input = h264_input(h264_sequence(), h264_picture());
+    input.slices = { &slice };
+
+    // A picture with no slice parameters keeps the default: filtering on.
+    EncodePicture bare = h264_input(h264_sequence(), h264_picture());
+    const iris::EncodeParams plain = h264->translate(bare);
+    check(plain.deblock_mode == 0 && plain.deblock_alpha == 0 && plain.deblock_beta == 0,
+        "no slice means the default deblocking");
+
+    slice.disable_deblocking_filter_idc = 0;
+    slice.slice_alpha_c0_offset_div2 = -3;
+    slice.slice_beta_offset_div2 = 4;
+    const iris::EncodeParams offsets = h264->translate(input);
+    check(offsets.deblock_mode == 0 && offsets.deblock_alpha == -3 && offsets.deblock_beta == 4,
+        "H.264 deblocking offsets are forwarded as asked");
+
+    // The slice header carries no offsets when filtering is off, so a stale
+    // value in the client's buffer must not reach the kernel.
+    slice.disable_deblocking_filter_idc = 1;
+    const iris::EncodeParams off = h264->translate(input);
+    check(off.deblock_mode == 1 && off.deblock_alpha == 0 && off.deblock_beta == 0,
+        "disabled deblocking drops the offsets");
+
+    slice.disable_deblocking_filter_idc = 3;
+    check(throws([&] { h264->translate(input); }), "an invalid H.264 deblocking idc is rejected");
+    slice.disable_deblocking_filter_idc = 0;
+    slice.slice_beta_offset_div2 = 7;
+    check(throws([&] { h264->translate(input); }), "an out-of-range H.264 beta offset is rejected");
+
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    VAEncSequenceParameterBufferHEVC sequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC picture = {};
+    VAEncSliceParameterBufferHEVC hslice = {};
+    EncodePicture hinput;
+    hinput.sequence = &sequence;
+    hinput.picture = &picture;
+    hinput.surface_width = 1920;
+    hinput.surface_height = 1080;
+    hinput.slices = { &hslice };
+
+    // Filtering across slice boundaries off is mode 2 in H.264's numbering,
+    // which is what the session maps to the HEVC menu.
+    const iris::EncodeParams boundaries = hevc->translate(hinput);
+    check(boundaries.deblock_mode == 2, "HEVC without across-slice filtering is mode 2");
+
+    hslice.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag = 1;
+    hslice.slice_tc_offset_div2 = 2;
+    hslice.slice_beta_offset_div2 = -2;
+    const iris::EncodeParams henabled = hevc->translate(hinput);
+    check(henabled.deblock_mode == 0 && henabled.deblock_alpha == 2 && henabled.deblock_beta == -2,
+        "HEVC tc and beta offsets are forwarded");
+
+    hslice.slice_fields.bits.slice_deblocking_filter_disabled_flag = 1;
+    const iris::EncodeParams hoff = hevc->translate(hinput);
+    check(hoff.deblock_mode == 1 && hoff.deblock_alpha == 0 && hoff.deblock_beta == 0,
+        "disabled HEVC deblocking drops the offsets");
+
+    hslice.slice_fields.bits.slice_deblocking_filter_disabled_flag = 2;
+    check(throws([&] { hevc->translate(hinput); }), "an invalid HEVC deblocking flag is rejected");
+    hslice.slice_fields.bits.slice_deblocking_filter_disabled_flag = 0;
+    hslice.slice_tc_offset_div2 = 7;
+    check(throws([&] { hevc->translate(hinput); }), "an out-of-range HEVC tc offset is rejected");
+}
+
+
+// A client request the encoder cannot honour fails; it is never answered with
+// a stream that quietly used something else.
+void test_unimplemented_features()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    VAEncPictureParameterBufferH264 picture = h264_picture();
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    check(status_of([&] { h264->translate(h264_input(sequence, picture)); }) == -1,
+        "the default picture parameters translate");
+
+    picture.pic_fields.bits.weighted_pred_flag = 1;
+    check(status_of([&] { h264->translate(h264_input(sequence, picture)); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "weighted prediction is refused");
+    picture = h264_picture();
+    picture.chroma_qp_index_offset = 1;
+    check(status_of([&] { h264->translate(h264_input(sequence, picture)); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "a chroma QP offset is refused");
+    picture = h264_picture();
+    picture.num_ref_idx_l0_active_minus1 = 1;
+    check(status_of([&] { h264->translate(h264_input(sequence, picture)); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "several reference indexes are refused");
+
+    VAEncSliceParameterBufferH264 slice = {};
+    EncodePicture one = h264_input(sequence, h264_picture());
+    one.slices = { &slice };
+    slice.cabac_init_idc = 1;
+    check(status_of([&] { h264->translate(one); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "a CABAC initialisation index is refused");
+
+    VAEncSliceParameterBufferH264 second = {};
+    EncodePicture many = h264_input(sequence, h264_picture());
+    many.slices = { &slice, &second };
+    check(status_of([&] { h264->translate(many); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "two slices are refused");
+
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC hpicture = {};
+    EncodePicture hinput;
+    hinput.sequence = &hsequence;
+    hinput.picture = &hpicture;
+    hinput.surface_width = 1920;
+    hinput.surface_height = 1080;
+    check(status_of([&] { hevc->translate(hinput); }) == -1, "the default HEVC parameters translate");
+
+    hpicture.pic_fields.bits.tiles_enabled_flag = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "HEVC tiles are refused");
+    hpicture = {};
+    hpicture.pic_fields.bits.weighted_pred_flag = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "HEVC weighted prediction is refused");
+    hpicture = {};
+    hpicture.pps_cb_qp_offset = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "a HEVC PPS chroma QP offset is refused");
+    hpicture = {};
+    hpicture.num_ref_idx_l0_default_active_minus1 = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "HEVC reference indexes are refused");
+
+    VAEncSliceParameterBufferHEVC hslice = {};
+    hinput.slices = { &hslice };
+    hslice.slice_cb_qp_offset = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "a HEVC slice chroma QP offset is refused");
+    hslice = {};
+    hslice.slice_fields.bits.dependent_slice_segment_flag = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "dependent slice segments are refused");
+
+    VAEncSliceParameterBufferHEVC hsecond = {};
+    hslice = {};
+    hinput.slices = { &hslice, &hsecond };
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "two HEVC slices are refused");
+}
 } // namespace
 
 int main()
@@ -243,6 +401,8 @@ int main()
     test_h264_translation();
     test_h264_rounding_and_rejections();
     test_hevc_translation();
+    test_deblocking();
+    test_unimplemented_features();
     if (failures) {
         std::cerr << failures << " encode parameter check(s) failed\n";
         return 1;

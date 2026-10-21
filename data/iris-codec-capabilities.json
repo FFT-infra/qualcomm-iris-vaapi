@@ -51,6 +51,10 @@
           "B-frames",
           "on-demand IDR",
           "packed headers (Annex-B output only)",
+          "deblocking other than the kernel default: no loop-filter controls on SM8550",
+          "multi-slice",
+          "weighted prediction, scaling lists and chroma QP offsets",
+          "more than one reference index",
           "10-bit or non-4:2:0"
         ]
       },
@@ -97,7 +101,11 @@
           "HEVC Main10",
           "B-frames",
           "on-demand IDR",
-          "packed headers (Annex-B output only)"
+          "packed headers (Annex-B output only)",
+          "deblocking other than the kernel default: no loop-filter controls on SM8550",
+          "multi-slice",
+          "tiles and wavefront coding",
+          "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits"
         ]
       },
       "experimental": []
