@@ -248,6 +248,39 @@ void test_hevc_translation()
     check(throws([&] { main10->translate(input); }), "Main10 encode profile is rejected");
 }
 
+// idr_pic_flag is the client's one request the encoder cannot pass straight
+// through: there is no force-keyframe control, so the session reads this
+// field and moves the intra period for that picture.
+void test_keyframe_request()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    VAEncPictureParameterBufferH264 h264_params = h264_picture();
+    check(!h264->translate(h264_input(h264_sequence(), h264_params)).keyframe,
+        "an H.264 picture without idr_pic_flag is not a keyframe request");
+    h264_params.pic_fields.bits.idr_pic_flag = 1;
+    check(h264->translate(h264_input(h264_sequence(), h264_params)).keyframe,
+        "idr_pic_flag is a keyframe request");
+
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    VAEncSequenceParameterBufferHEVC sequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC hevc_params = {};
+    EncodePicture input;
+    input.sequence = &sequence;
+    input.picture = &hevc_params;
+    input.surface_width = 1920;
+    input.surface_height = 1080;
+    check(!hevc->translate(input).keyframe, "an HEVC picture without idr_pic_flag is not a keyframe request");
+    hevc_params.pic_fields.bits.idr_pic_flag = 1;
+    check(hevc->translate(input).keyframe, "HEVC idr_pic_flag is a keyframe request");
+
+    // A requested IDR in an intra-only stream needs no lever; the flag still
+    // reaches the session so the trace and the prefixing decision agree.
+    VAEncSequenceParameterBufferH264 intra = h264_sequence();
+    intra.intra_period = 0;
+    check(h264->translate(h264_input(intra, h264_params)).keyframe,
+        "an intra-only stream still reports the request");
+}
+
 void test_deblocking()
 {
     auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
@@ -401,6 +434,7 @@ int main()
     test_h264_translation();
     test_h264_rounding_and_rejections();
     test_hevc_translation();
+    test_keyframe_request();
     test_deblocking();
     test_unimplemented_features();
     if (failures) {

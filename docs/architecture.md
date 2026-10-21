@@ -251,9 +251,25 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
   per picture; everything else is written once, in `configure`.
 - `GOP_SIZE` counts the I frame inside its period: programming N puts the
   next IDR at frame N+1. VA's `intra_period` is the distance between I
-  frames, so the session writes `intra_period - 1`. Without a kernel
-  `FORCE_KEY_FRAME` control the periodic IDR is the only keyframe source; a
-  client's per-picture IDR request cannot be honored.
+  frames, so the session writes `intra_period - 1`.
+- A client's per-picture IDR request (`idr_pic_flag`) is honoured by moving
+  the intra period, not by a keyframe control, which this node does not
+  have. The session sets `GOP_SIZE` to zero for that picture and puts the
+  session period back before the picture is queued: restoring after the
+  completion makes the following picture an IDR too, because the firmware
+  schedules the next boundary from the value it last saw. The lever is
+  never skipped for a request, even on a picture the firmware would make an
+  IDR anyway — a driver-side guess at the firmware's schedule drifts and
+  drops requests. The schedule re-anchors on each requested IDR (as x264
+  and libx265 do), so `-force_key_frames` and `-g` agree and the next
+  automatic IDR lands one GOP after the requested one.
+- A levered IDR is not a firmware sync frame, so it may carry no SPS/PPS:
+  the firmware prefixes the parameter sets to its own IDRs only. The
+  session keeps the sets and SEI the last access unit carried and puts them
+  in front of a requested IDR that has none, which is what makes a stream
+  cut there decodable. `src/codec/annexb.cc` does the splitting and
+  understands both NAL layouts (H.264's five-bit type, HEVC's six-bit field
+  at a two-byte header).
 - CQP turns firmware rate control off (`FRAME_RC_ENABLE=0`) and writes the
   I/P QP controls from `pic_init_qp` plus the first slice's delta. Iris
   sizes the coded queue from the current controls, so `configure` re-sets
@@ -268,8 +284,8 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
   that does need packed headers is a separate change with its own evidence.
 - The running SM8550 module exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`
   (`v4l2-ctl -d <encoder> --list-ctrls` shows the GOP size and the QP
-  controls, no key-frame request), so on-demand IDR is not implemented
-  rather than pending.
+  controls, no key-frame request), which is why the intra period is the
+  lever above and not a control write of its own.
 - Deblocking is a slice header property in VA and a per-context control in
   V4L2, so `configure_deblocking` reads the first slice and writes
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
@@ -336,6 +352,7 @@ src/
     encode.h          EncodePicture + Encoder interface shared by both codecs
     encode_h264.cc    VA encode buffers -> EncodeParams, H.264 menu values
     encode_hevc.cc    the same for HEVC, Main only
+    annexb.{h,cc}     NAL splitting and the SPS/PPS a requested IDR needs
   util/
     options.{h,cc}    every environment variable, read once at init
     prime.{h,cc}      the CAPTURE layout in one place, and the client DMA-BUF
@@ -466,7 +483,7 @@ ends with a tag. Gates are commands, not opinions.
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
-| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce | (in `feat/encode-entrypoints`) |
+| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce; `encode-params` for the translation and the request rejections, `annexb` for what a requested IDR carries; on the target, one-second segments cut at `-force_key_frames` in both codecs and a 24 fps run past every GOP boundary | (in `feat/encode-entrypoints`) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
