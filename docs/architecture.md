@@ -444,7 +444,7 @@ va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
-encode frame index=<n> bytes=<n>
+encode frame index=<n> bytes=<n> idr=0|1
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
 encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
@@ -526,7 +526,18 @@ them).
     reference indexes — the firmware writes the sequence headers, owns the
     reference structure and chooses the quantisation, so none of them can be
     forwarded. Deblocking additionally cannot change inside a live context.
-14. A surface created over client memory is a view of exactly one linear
+14. An encode picture is a requested IDR only when the bitstream says so: the
+    node has no force-keyframe control, so the session pulls the intra period
+    to zero for that picture and puts it back before queueing it — restoring
+    after the completion made the following picture an IDR as well. The
+    lever is never skipped, because a driver-side guess at the firmware's own
+    GOP schedule dropped requests. `idr=1` in the trace is the request.
+15. An encode timestamp rises strictly: the session rate is fixed at
+    configuration time and each picture advances by one frame duration. VA
+    clients send the frame rate only with IDR pictures, and a timestamp
+    derived per picture therefore went backwards after every GOP boundary,
+    which stopped the firmware returning access units.
+16. A surface created over client memory is a view of exactly one linear
     DMA-BUF in the CAPTURE layout; the driver owns a duplicate of the fd and
     the client may close its own. Any other geometry, modifier or object
     count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture

@@ -95,6 +95,11 @@ public:
     }
 
     const std::map<uint32_t, int32_t>& written() const { return written_; }
+    unsigned writes(uint32_t id) const
+    {
+        const auto it = writes_.find(id);
+        return it == writes_.end() ? 0 : it->second;
+    }
     bool wrote(uint32_t id) const { return written_.count(id) != 0; }
     int32_t value(uint32_t id) const
     {
@@ -153,6 +158,7 @@ public:
         if (!known_.count(id))
             return false;
         written_[id] = value;
+        ++writes_[id];
         return true;
     }
 
@@ -203,6 +209,9 @@ public:
         // back — the transaction the session expects from a real node.
         if (queue == iris::Queue::Output) {
             timestamps_.push_back(timestamp_us);
+            gop_at_queue_.push_back(written_.count(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
+                    ? written_.at(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
+                    : INT_MIN);
             staged_.push_back(iris::Dequeued { 0, 0, 0, kPayload, 0 });
             returned_.push_back(index);
         }
@@ -233,6 +242,7 @@ public:
     }
 
     const std::vector<uint64_t>& timestamps() const { return timestamps_; }
+    const std::vector<int32_t>& gop_at_queue() const { return gop_at_queue_; }
     unsigned frame_rate_num() const { return frame_rate_num_; }
     unsigned frame_rate_den() const { return frame_rate_den_; }
 
@@ -260,10 +270,12 @@ public:
 private:
     std::set<uint32_t> known_;
     std::map<uint32_t, int32_t> written_;
+    std::map<uint32_t, unsigned> writes_;
     std::vector<std::vector<uint8_t>> capture_;
     std::vector<iris::Dequeued> staged_;
     std::vector<unsigned> returned_;
     std::vector<uint64_t> timestamps_;
+    std::vector<int32_t> gop_at_queue_;
     uint32_t codec_ = V4L2_PIX_FMT_H264;
     uint32_t raw_ = 0;
     unsigned width_ = 1920, height_ = 1080;
@@ -458,6 +470,55 @@ void test_timestamps_never_go_backwards()
     session.finish();
 }
 
+// The node has no force-keyframe control, so one picture becomes an IDR by
+// asking the firmware for an intra picture and putting the period back before
+// the picture is queued. An intra-only stream needs no lever, and the lever
+// is pulled for every requested picture so no request is dropped.
+void test_on_demand_idr()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1, "configure");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == 59, "GOP 60 programs 59 into the raw control");
+
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    check(session.encode(fd, kCaptureSlot, params(0, 0, 0)).bytes.size() == kPayload, "a P-position picture");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == 59, "a regular picture leaves the GOP alone");
+
+    iris::EncodeParams key = params(0, 0, 0);
+    key.keyframe = true;
+    check(session.encode(fd, kCaptureSlot, key).bytes.size() == kPayload, "the requested picture");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == 59, "the GOP is back after the IDR");
+
+    // The period must be back before the picture reaches the firmware: the
+    // firmware schedules the next boundary from the value it sees, and a
+    // restore after the completion made the following picture an IDR too.
+    const std::vector<int32_t>& queued = raw->gop_at_queue();
+    check(queued.size() == 2 && queued[0] == 59 && queued[1] == 59,
+        "the period is restored before the picture is queued");
+
+    // A request at the firmware's own boundary is not skipped: skipping made
+    // the driver's schedule drift and dropped requests.
+    const unsigned before = raw->writes(V4L2_CID_MPEG_VIDEO_GOP_SIZE);
+    check(session.encode(fd, kCaptureSlot, key).bytes.size() == kPayload, "a second requested picture");
+    check(raw->writes(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == before + 2,
+        "every requested picture pulls the lever and puts it back");
+
+    iris::EncodeParams intra = params(0, 0, 0);
+    intra.gop_size = 0;
+    intra.keyframe = true;
+    check(session.encode(fd, kCaptureSlot, intra).bytes.size() == kPayload, "an intra-only picture");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == 0, "an intra-only stream writes no lever");
+    session.finish();
+}
+
 } // namespace
 
 int main()
@@ -466,6 +527,7 @@ int main()
     test_control_values();
     test_change_needs_a_new_context();
     test_timestamps_never_go_backwards();
+    test_on_demand_idr();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

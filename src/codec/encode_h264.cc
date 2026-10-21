@@ -115,6 +115,7 @@ public:
         out.bitrate = sequence->bits_per_second;
         out.gop_size = sequence->intra_period;
         out.cabac = params->pic_fields.bits.entropy_coding_mode_flag != 0;
+        out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {

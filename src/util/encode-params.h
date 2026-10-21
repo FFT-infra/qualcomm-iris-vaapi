@@ -42,6 +42,10 @@ struct EncodeParams {
     int deblock_mode = 0;
     int deblock_alpha = 0;
     int deblock_beta = 0;
+    // This picture must be an IDR (VA's idr_pic_flag). The firmware has no
+    // force-keyframe control, so the session uses the intra period for one
+    // picture; see EncoderSession::encode().
+    bool keyframe = false;
 };
 
 } // namespace iris

@@ -342,6 +342,18 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
     require(configured_ && !finished_, "encoder is not streaming", VA_STATUS_ERROR_OPERATION_FAILED);
     apply_dynamic(params);
 
+    // The node exposes no V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME and the
+    // firmware capability list has no RAP control, so the intra period is the
+    // only lever that makes one picture an IDR: zero asks the firmware for an
+    // intra picture, and putting the period back restores the GOP. The lever
+    // is pulled for every requested picture, including one that would be an
+    // IDR anyway: skipping those made the driver's idea of the schedule drift
+    // from the firmware's and silently dropped requests. A stream that is
+    // intra-only needs no lever at all.
+    const bool force_idr = params.keyframe && params.gop_size != 0;
+    if (force_idr)
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 0, "gop size");
+
     // The device layer takes microseconds and the encoder echoes the value
     // into the access unit. Advance by one frame duration per picture rather
     // than recomputing from the current picture's rate: FFmpeg sends
@@ -361,6 +373,12 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
         reclaim_output(limit);
     const unsigned index = free_output_.front();
     free_output_.pop_front();
+    // The intra period goes back to the session's value before the picture is
+    // queued, not after its completion: the firmware schedules the next GOP
+    // boundary from the period it sees, so restoring afterwards made the
+    // picture after a requested one an IDR as well.
+    if (force_idr)
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
     // bytesused must be non-zero: vb2 rejects a zero-length raw buffer and
     // poisons the instance.
     device_->queue_buffer_dmabuf(Queue::Output, index, dmabuf_fd, dmabuf_length, dmabuf_length, timestamp_us, 0);
@@ -379,7 +397,8 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
     // evidence (an IDR NAL at every GOP boundary).
-    trace_("encode frame index=%u bytes=%zu", frames_++, result.bytes.size());
+    trace_("encode frame index=%u bytes=%zu idr=%d", frames_++, result.bytes.size(),
+        params.keyframe ? 1 : 0);
 
     if (!completion->last())
         device_->queue_buffer(Queue::Capture, slot.index, slot.length, 0, 0);

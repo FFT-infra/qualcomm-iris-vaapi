@@ -162,9 +162,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- **编码不能按需出 IDR。** 节点没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，
-  固件能力表里也没有 RAP 控制项，关键帧只能靠 GOP 长度。从 GOP 中间切开，
-  流要等到下一个 IDR 才能播。
+- **按需 IDR 是挪 GOP 挪出来的，靠的不是关键帧控制项。** 节点没有
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，固件能力表里也没有 RAP 控制项，所以
+  客户端要 IDR 时，驱动把这一张图的 intra period 设成 0，并在这张图入队之前
+  把周期改回去。`-force_key_frames` 配 `-c copy` 或者分段封装，切点就在它要的
+  位置；下一个自动 IDR 在这一次之后一个 GOP 处，而不是原来的排期上。每张
+  请求 IDR 的图都要多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。

@@ -189,10 +189,15 @@ is usable as an encode input as well.
 - **One qualified device.** Everything above was measured on one SM8550
   tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
   packaging is provided but not validated.
-- **Encode has no on-demand IDR.** The node exposes no
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` and the firmware capability list has
-  no RAP control, so keyframes come from the GOP size only. Cutting a stream
-  mid-GOP leaves it unplayable until the next IDR.
+- **On-demand IDR works by moving the GOP, not by a keyframe control.** The
+  node exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` and the firmware
+  capability list has no RAP control, so a requested IDR is produced by
+  setting the intra period to zero for that one picture and putting it back
+  before the picture is queued. `-force_key_frames` with a stream copy or a
+  segment muxer therefore cuts where it asks; the next automatic IDR is one
+  GOP after the requested one, not after the original schedule. The
+  intra-period change is a control write per requested picture, so a request
+  on every frame costs more than a plain intra-only stream.
 - **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
   break the one-in-one-out model. A context whose sequence parameters ask for
   `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.

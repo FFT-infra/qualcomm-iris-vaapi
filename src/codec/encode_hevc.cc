@@ -90,6 +90,7 @@ public:
             "HEVC coded size exceeds the input surface", VA_STATUS_ERROR_INVALID_PARAMETER);
 
         EncodeParams out;
+        out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
         out.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
         out.level = level_menu(sequence->general_level_idc);
         out.rate_mode = rate_mode_;
