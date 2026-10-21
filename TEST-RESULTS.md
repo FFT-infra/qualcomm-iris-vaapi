@@ -1749,3 +1749,86 @@ PASS node=/dev/video1 loop_filter_controls=absent h264_off=0x14 h264_alpha=0x14 
 when the node reports the controls absent and success when it reports them
 present, so it is a gate on either kind of kernel, and it configures and
 tears down four real sessions on the way (STOP, drain, STREAMOFF).
+
+## Client-owned surfaces: DRM_PRIME_2 and PRIME_1 import (2026-10-22)
+
+Source `2cb3a7b`, driver `build/src/v4l2_drv_video.so` SHA-256
+`2f99c2a1d165aeb35fcdea04f2492d42cbf29659a49c3c21cdf6d8b5fc8e1101`
+(deployed from tracked-source SHA-256
+`9d7df611a09ee3f5fd464c5e6945bb68fbd777d936a98d84aaa50922c92442d3`,
+provenance `source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`,
+boot ID `32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree
+only, no installed package. Nodes resolved by the `iris_driver` QUERYCAP
+name: `/dev/video0` (`Iris Decoder`), `/dev/video1` (`Iris Encoder`).
+
+`vaCreateSurfaces2` now takes the client's own DMA-BUF (DRM_PRIME_2
+descriptor or PRIME_1 buffer table) instead of refusing it. The surface is
+a view over that object in the CAPTURE layout, the fd is duplicated, and
+`persistent_export` is set, so the decode path is the Import policy already
+recorded above (2026-09-22) and the encode path is the ordinary input
+surface. Everything below is `LIBVA_DRIVER_NAME=v4l2` with
+`LIBVA_DRIVERS_PATH=<build>/src`.
+
+`prime-import` (host, no hardware) is the layout and refusal contract:
+the accepted composed-layer and two-layer forms for NV12 and P010, the
+accepted PRIME_1 table, and every refusal — foreign fourcc or size, two
+objects, a missing fd, a tiled modifier, zero layers, swapped luma/chroma
+layers, a pitch that is not the CAPTURE pitch, chroma at the wrong offset,
+luma not at offset 0, an object smaller than its planes, an allocation
+smaller than the descriptor claims, a tiled PRIME_1 table, two PRIME_1
+buffers. It also pins the one definition of the layout: `plane_layout()`
+and `stable_layout()` agree on stride and chroma offset at 1280x720,
+1920x1080 and 3840x2176, and the stable size is the plane bytes rounded to
+4 KiB.
+
+`test/iris-va-import-probe.cc` is the target half. It is a plain libva
+client: it allocates the client buffer the way a compositor on this
+platform does (MSM GEM, `stable_layout` size) or, with the `heap`
+argument, the way a client that sizes its own allocation does (system
+heap, exactly the plane bytes, no 4 KiB rounding). Both runs, 1280x720
+NV12:
+
+```
+PASS DRM_PRIME_2 import in the CAPTURE layout creates a surface
+PASS driver-allocated surface creates
+PASS the imported surface is a view of the client's bytes
+PASS H.264 encode config creates
+PASS encoding the imported surface gives the same bitstream
+PASS changed client bytes change the bitstream by the same amount
+payload normal=681554 import=681554 changed=687376 changed_import=687376
+PASS a client pitch the firmware does not write is refused
+PASS PRIME_1 import in the CAPTURE layout creates a surface
+```
+
+What each check establishes:
+
+- **View, not copy.** Bytes written through the client's fd (bracketed with
+  `DMA_BUF_IOCTL_SYNC`, chroma at the CAPTURE chroma offset) are what
+  `vaDeriveImage` + `vaMapBuffer` returns, without any upload call.
+- **The firmware reads the client's memory.** One intra-only CQP picture
+  (QP 26, `intra_period = 0`) is encoded from the imported surface and from
+  a driver-allocated one through a fresh context each, so both are the
+  first picture of their session and no rate-control or `frame_num` state
+  can differ. The two bitstreams are byte-identical (681,554 bytes). After
+  changing the pixels on both sides the two bitstreams are again identical
+  to each other (687,376 bytes) and different from the first pair.
+- **Refusal happens at creation.** A descriptor whose luma pitch is twice
+  the CAPTURE pitch returns `VA_STATUS_ERROR_INVALID_PARAMETER`; libva
+  prints the driver's message.
+
+The first measurement of this probe compared encodes inside one session and
+was wrong for a mundane reason worth recording: the second picture was a P
+frame predicting from the first, so a 554 KB IDR was followed by a 1.7 KB
+P frame and the comparison "different" measured GOP position, not memory.
+
+Regression on the same build: 120 frames each of
+`sintel-1080p30-h264-b3.mp4` and `sintel-1080p30-hevc-b3.mp4` decode
+through `-hwaccel vaapi -hwaccel_output_format vaapi` with no error, the
+H.264 trace ends `session finish submitted=132 completed=132 errors=0
+drops=0 timeouts=0 drains=1 misplaced=0`, a 30-frame `h264_vaapi` encode
+produces a 30-frame stream, and `iris-encode-control-probe` on
+`/dev/video1` reports the same six absent controls and `0x14` for the
+three non-default deblocking requests as the previous record.
+
+`meson test` is 17/17 ( `prime-import` added to the CI inventory) and
+`sh test/run-static-checks.sh` passes.
