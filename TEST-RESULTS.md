@@ -1937,3 +1937,36 @@ restore-before-queue ordering and the intra-only case; removing either
 rule fails it (`FAIL: the period is restored before the picture is
 queued`, `FAIL: a request at the firmware's own GOP boundary writes no
 lever`). `meson test` is 17/17 and `sh test/run-static-checks.sh` passes.
+
+## Segments cut at a requested IDR (2026-10-22)
+
+Source `90f867b`, driver SHA-256
+`d11df8030e61a231a21e0355476d5da3b96a448cdcd48e1d2c4309f6789aa4f6`
+(`source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, build tree only, 1280x720 at
+24 fps, `-g 60 -force_key_frames expr:gte(t,n_forced*1)`, `-f segment
+-segment_time 1 -segment_format mpegts`.
+
+H.264 and HEVC both write 240 frames as 10 one-second segments; every
+segment starts on a keyframe and decodes with `ffmpeg -i … -f null -` and
+no error. Iris IRQ delta over both runs: 1633. The same build decodes 120
+frames each of `sintel-1080p30-h264-b3.mp4` and
+`sintel-1080p30-hevc-b3.mp4` through the VA path with no error.
+
+The first attempt at this produced six of ten H.264 segments and nine of
+ten HEVC segments that failed to decode, for two separate reasons:
+
+- **The levered IDR carried no SPS/PPS.** The firmware prefixes the
+  parameter sets to its own sync frames only, so a stream cut at a
+  requested IDR began with an IDR slice referencing sets the segment did
+  not contain (`non-existing PPS 0 referenced`). The session now keeps the
+  sets the last access unit carried and prefixes a requested IDR that has
+  none, which is what FFmpeg does with extradata before a keyframe.
+- **HEVC sets were classified with H.264 rules.** Types 32-34 were not
+  recognised as parameter sets at all, so HEVC segments still began with
+  `PPS id out of range`. `test/annexb-test.cc` covers both codecs now; it
+  also caught the type constants being declared `bool`, which made every
+  non-zero NAL type compare equal to SPS.
+
+`meson test` is 18/18 (`annexb` added to the CI inventory) and
+`sh test/run-static-checks.sh` passes.

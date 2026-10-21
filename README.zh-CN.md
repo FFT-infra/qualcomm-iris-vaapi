@@ -168,6 +168,7 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   把周期改回去。`-force_key_frames` 配 `-c copy` 或者分段封装，切点就在它要的
   位置；下一个自动 IDR 在这一次之后一个 GOP 处，而不是原来的排期上。每张
   请求 IDR 的图都要多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。
+  请求出来的 IDR 可以当切点用：它带着固件上一次写出的 SPS/PPS（以及 SEI）。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。

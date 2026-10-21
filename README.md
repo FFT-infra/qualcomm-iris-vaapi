@@ -197,7 +197,8 @@ is usable as an encode input as well.
   segment muxer therefore cuts where it asks; the next automatic IDR is one
   GOP after the requested one, not after the original schedule. The
   intra-period change is a control write per requested picture, so a request
-  on every frame costs more than a plain intra-only stream.
+  on every frame costs more than a plain intra-only stream. A requested IDR
+  is a cut point: it carries the last SPS/PPS (and SEI) the firmware wrote.
 - **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
   break the one-in-one-out model. A context whose sequence parameters ask for
   `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.
