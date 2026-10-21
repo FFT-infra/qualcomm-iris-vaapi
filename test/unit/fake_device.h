@@ -96,6 +96,12 @@ public:
     FormatInfo get_format(Queue queue) override;
     FormatInfo set_format(Queue queue, const FormatInfo& request) override;
     std::optional<Selection> get_compose(Queue queue) override;
+    void set_crop(unsigned left, unsigned top, unsigned width, unsigned height) override
+    {
+        note("s_crop " + std::to_string(left) + " " + std::to_string(top) + " " + std::to_string(width) + " "
+            + std::to_string(height));
+        crop_ = Selection { left, top, width, height };
+    }
     bool format_supported(Queue, uint32_t) override { return true; }
     std::optional<int32_t> get_control(uint32_t id) override;
     bool set_control(uint32_t id, int32_t value) override;
@@ -111,9 +117,16 @@ public:
         unsigned bytesused, uint64_t timestamp_us, uint32_t flags) override;
     std::optional<Dequeued> dequeue_buffer(Queue queue) override;
     void stream(Queue queue, bool on) override;
+    void set_frame_rate(Queue queue, unsigned num, unsigned den) override
+    {
+        note("s_parm " + std::to_string(num) + "/" + std::to_string(den));
+        frame_rate_ = { num, den };
+        (void)queue;
+    }
     void subscribe(uint32_t) override { }
     Event dequeue_event() override;
     bool decoder_command(uint32_t cmd) override;
+    bool encoder_command(uint32_t) override { return true; }
     short poll(short events, int timeout_ms) override;
 
 private:
@@ -127,6 +140,8 @@ private:
     FakeConfig config_;
     std::vector<std::string> log_;
     std::map<uint32_t, int32_t> controls_;
+    Selection crop_;
+    std::pair<unsigned, unsigned> frame_rate_ { 0, 0 };
     bool output_on_ = false, capture_on_ = false;
     bool source_change_pending_ = false;
     bool output_format_set_ = false;

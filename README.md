@@ -41,6 +41,19 @@ Chrome 152.
 with the platform flag set and a decoded-frame count over a 30 s window with
 no dropped frames; a mapped node or a running GPU process proves nothing.
 
+The same display also answers `VAEntrypointEncSlice`, on the encoder node the
+kernel exposes next to the decoder. Chrome does not use it; FFmpeg,
+GStreamer and anything else that asks libva for an encode entrypoint do.
+
+| Codec | Entrypoint | Input | Output | Verification |
+| --- | --- | --- | --- | --- |
+| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`, CBR or VBR | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`, IRQ delta and a decodable stream (TEST-RESULTS.md) |
+| HEVC Main | `VAEntrypointEncSlice`, CBR or VBR | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`, IRQ delta and a decodable stream (TEST-RESULTS.md) |
+
+"Hardware encode" means the run moved the Iris IRQ counter, the bitstream
+decodes without errors, and its SPS matches the requested profile, level and
+geometry. A VA context that only returns bytes proves nothing.
+
 ## Requirements
 
 - An SoC with the `qcom-iris` decoder (HFI gen2; SM8550 is the qualified
@@ -152,6 +165,24 @@ publishing. The contract, the state machine and the trace vocabulary are in
 - Three HEVC conformance vectors (`DELTAQP_A_BRCM_4`,
   `INITQP_B_Main10_Sony_1`, `PMERGE_E_TI_3`) decode every frame without a
   firmware error but differ in pixels; not chased yet.
+- **Encode has no on-demand IDR.** The node exposes no
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` and the firmware capability list has
+  no RAP control, so keyframes come from the GOP size only. Cutting a stream
+  mid-GOP leaves it unplayable until the next IDR.
+- **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
+  break the one-in-one-out model. A context whose sequence parameters ask for
+  `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.
+- **No 10-bit, VP9 or AV1 encode.** The encoder OUTPUT queue enumerates NV12
+  and QC08C only, so HEVC Main10 and VP9 Profile 2 cannot be fed.
+- **Annex-B only.** The driver advertises no packed headers and the firmware
+  writes SPS/PPS itself, so an encode context has no extradata. Raw `.h264`
+  or `.hevc` output works; muxing to MP4 needs a remux
+  (`ffmpeg -i out.h264 -c copy out.mp4`).
+- **One picture per context at a time.** `vaEndPicture` runs the whole V4L2
+  transaction, and a VA context has a fixed geometry: changing resolution
+  needs a new context.
+- **No multi-slice, tiles, ROI or `-max_frame_size`.** FFmpeg fails those
+  requests loudly; they are not silently ignored.
 
 ## Development
 
@@ -198,6 +229,7 @@ the launcher sets none of them.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LIBVA_V4L2_VIDEO_PATH` | probe | Use this decoder node instead of scanning `/dev/video*` for the `iris_driver` decoder. |
+| `LIBVA_V4L2_ENCODER_PATH` | probe | Use this encoder node instead of scanning `/dev/video*` for the `iris_driver` encoder. A path that is not an Iris encoder fails display init. |
 | `V4L2_VA_TRACE` | off | Per-frame trace on stderr. Any value enables it. The record vocabulary is documented in `docs/architecture.md`. |
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface()` wait, `50..60000`. Without an override the first frame of a cold session may wait up to `30000` ms for firmware bring-up. |
 | `V4L2_VA_COPY` | `gpu` | Engine used to publish a frame into a surface the client exported before its first decode: `gpu` (EGL blit on Adreno) or `cpu`. |

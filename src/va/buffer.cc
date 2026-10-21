@@ -9,6 +9,7 @@
 
 extern "C" {
 #include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <unistd.h>
 #include <va/va_drmcommon.h>
 }
@@ -24,6 +25,18 @@ VAStatus createBuffer(VADriverContextP ctx, VAContextID, VABufferType type, unsi
     case VASliceParameterBufferType:
     case VASliceDataBufferType:
     case VAImageBufferType:
+    // Encode parameters. The firmware derives what it needs from these
+    // before the first picture; the glue only copies them for the codec
+    // translator.
+    case VAEncSequenceParameterBufferType:
+    case VAEncPictureParameterBufferType:
+    case VAEncSliceParameterBufferType:
+    case VAEncMiscParameterBufferType:
+    case VAEncPackedHeaderParameterBufferType:
+    case VAEncPackedHeaderDataBufferType:
+    // The coded buffer's capacity is `size`; the bytes land in `payload`
+    // when vaEndPicture returns, and mapBuffer hands out the segment.
+    case VAEncCodedBufferType:
         break;
     default:
         return VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE;
@@ -33,8 +46,9 @@ VAStatus createBuffer(VADriverContextP ctx, VAContextID, VABufferType type, unsi
     b->type = type;
     b->size = size;
     b->count = count;
-    b->data.resize(static_cast<size_t>(size) * count);
-    if (initial)
+    if (type != VAEncCodedBufferType)
+        b->data.resize(static_cast<size_t>(size) * count);
+    if (initial && !b->data.empty())
         std::memcpy(b->data.data(), initial, b->data.size());
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     *id = d.next_id++;
@@ -62,7 +76,28 @@ VAStatus mapBuffer(VADriverContextP ctx, VABufferID id, void** mapped)
     auto it = d.buffers.find(id);
     if (it == d.buffers.end())
         return VA_STATUS_ERROR_INVALID_BUFFER;
-    *mapped = it->second->data.data();
+    auto& b = *it->second;
+    if (b.type == VAEncCodedBufferType) {
+        // vaMapBuffer on a coded buffer returns a linked list of
+        // VACodedBufferSegment, terminated by next == NULL. One segment is
+        // the whole access unit.
+        b.segment.size = static_cast<uint32_t>(b.payload.size());
+        b.segment.bit_offset = 0;
+        b.segment.status = 0;
+        b.segment.reserved = 0;
+        b.segment.buf = b.payload.empty() ? nullptr : b.payload.data();
+        b.segment.next = nullptr;
+        *mapped = &b.segment;
+        return VA_STATUS_SUCCESS;
+    }
+    // A derived image is a view over the surface's DMA-BUF, not a copy.
+    if (b.alias) {
+        if (b.alias_fd >= 0)
+            iris::dma_buf_cpu_sync(b.alias_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE);
+        *mapped = b.alias;
+        return VA_STATUS_SUCCESS;
+    }
+    *mapped = b.data.data();
     return VA_STATUS_SUCCESS;
 }
 
@@ -70,7 +105,15 @@ VAStatus unmapBuffer(VADriverContextP ctx, VABufferID id)
 {
     auto& d = data(ctx);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
-    return d.buffers.count(id) ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_INVALID_BUFFER;
+    auto it = d.buffers.find(id);
+    if (it == d.buffers.end())
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    // The client wrote through a mapped derived image: end the CPU access
+    // window so the VPU sees those bytes when the surface is submitted.
+    const auto& b = *it->second;
+    if (b.alias && b.alias_fd >= 0)
+        iris::dma_buf_cpu_sync(b.alias_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+    return VA_STATUS_SUCCESS;
 }
 
 VAStatus bufferSetNumElements(VADriverContextP ctx, VABufferID id, unsigned count)

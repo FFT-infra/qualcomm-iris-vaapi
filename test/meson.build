@@ -24,6 +24,14 @@ hevc_parameter_sets_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('hevc-parameter-sets', hevc_parameter_sets_test)
 
+# VA encode parameters -> V4L2 controls, both codecs, no hardware.
+encode_params_test = executable(
+  'encode-params-test',
+  'encode-params-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('encode-params', encode_params_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.

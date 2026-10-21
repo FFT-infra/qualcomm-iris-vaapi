@@ -128,6 +128,31 @@ Capabilities probe_capabilities(const iris::Options& options)
     }
     if (options.experimental_profiles && caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
+
+    // The encoder is a second iris_driver node. Its absence is not fatal:
+    // the display still decodes, and no encode entrypoint is advertised.
+    try {
+        auto encoder = iris::open_device(options.encoder_path, iris::NodeRole::Encoder);
+        caps.encoder_node = encoder->path();
+        const bool encoder_nv12 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_NV12);
+        for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
+            if (encoder->format_supported(iris::Queue::Capture, format))
+                caps.encoder_formats.insert(format);
+        // encode-qualified-begin
+        if (caps.encoder_formats.count(V4L2_PIX_FMT_H264) && encoder_nv12) {
+            caps.encode_profiles.insert(VAProfileH264ConstrainedBaseline);
+            caps.encode_profiles.insert(VAProfileH264Main);
+            caps.encode_profiles.insert(VAProfileH264High);
+        }
+        if (caps.encoder_formats.count(V4L2_PIX_FMT_HEVC) && encoder_nv12)
+            caps.encode_profiles.insert(VAProfileHEVCMain);
+        // encode-qualified-end
+    } catch (const std::exception&) {
+        // An explicit override that does not name an encoder is a
+        // misconfiguration, not an absent node.
+        if (!options.encoder_path.empty())
+            throw;
+    }
     return caps;
 }
 
@@ -184,8 +209,10 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
         d->copier = iris::make_gpu_copy(d->render_fd);
     if (!d->copier)
         d->copier = iris::make_cpu_copy();
-    d->trace("va init node=%s render_fd=%d copy=%s profiles=%zu", d->capabilities.node.c_str(), d->render_fd,
-        d->copier->name(), d->capabilities.profiles.size());
+    d->trace("va init node=%s encoder=%s render_fd=%d copy=%s profiles=%zu encode_profiles=%zu",
+        d->capabilities.node.c_str(),
+        d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
+        d->copier->name(), d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
 
     ctx->version_major = VA_MAJOR_VERSION;
     ctx->version_minor = VA_MINOR_VERSION;

@@ -22,8 +22,17 @@ frames and no CPU-side copy on the hot path.** Everything else (FFmpeg,
 GStreamer, mpv, Firefox, Electron) follows from the same mechanism and is
 welcome, but Chrome is the acceptance client.
 
+The same display also answers `VAEntrypointEncSlice` for H.264 and HEVC Main
+on the encoder node the kernel exposes next to the decoder. Encode is a
+second entrypoint, not a second product: it exists so FFmpeg's `h264_vaapi`
+and `hevc_vaapi` (and anything else that asks a VA display for an encode
+entrypoint) can use the VPU without a second display or a second driver.
+Scope: H.264 Constrained Baseline/Main/High and HEVC Main, CBR or VBR, NV12
+input, Annex-B output, one picture in flight per context.
+
 Non-goals: being a generic backend for stateless request-API decoders (that
-is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), encoding,
+is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
+10-bit encode, B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
 video post-processing, and shipping a custom Chromium.
 
 ## 2. Target and kernel contract
@@ -200,6 +209,42 @@ Ordering facts learned on this firmware and kept verbatim:
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.
 
+### 4.1 Encode session
+
+The encoder is the other M2M node and has its own, much smaller machine. It
+is synchronous: one VA picture is one V4L2 transaction, completed inside
+`vaEndPicture`.
+
+```
+Closed --first end_picture--> Configured(CAPTURE S_FMT codec, OUTPUT S_FMT NV12,
+    crop, controls, S_PARM, REQBUFS 4 on both queues, STREAMON both, QBUF all CAPTURE)
+Configured/Streaming --end_picture--> Streaming(QBUF one raw buffer, poll CAPTURE,
+    DQBUF pair, copy bytes, requeue CAPTURE)
+Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
+```
+
+- Every `S_FMT` may substitute a fourcc; the session re-reads `G_FMT` and
+  requires the codec, width and height it asked for.
+- `S_FMT` on a queue that holds buffers is `EBUSY`, so all format, crop and
+  control work happens before `REQBUFS`.
+- OUTPUT `S_FMT` aligns the raw buffer to 128x32 and resets the crop to that
+  aligned size. The session then sets `V4L2_SEL_TGT_CROP` on the non-mplane
+  OUTPUT type; the coded size becomes `ALIGN(crop, 16 H.264 / 32 HEVC)`.
+  Without that step a 1080-line surface produces a 1088-line bitstream.
+- No frame-rate control exists. `S_PARM(CAPTURE)` is the rate the firmware
+  encodes at; `S_PARM(OUTPUT)` is the operating rate and only moves clocks.
+  Both get the same value.
+- Controls that are not dynamic return `EINVAL` while OUTPUT streams.
+  `BITRATE`, `BITRATE_PEAK` and `GOP_SIZE` are dynamic and are re-applied
+  per picture; everything else is written once, in `configure`.
+- An OUTPUT `QBUF` with `bytesused == 0` is rejected and poisons the
+  instance, so the session passes the plane length.
+- The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
+  mismatched surface is an error rather than a reconfigure.
+- After `V4L2_ENC_CMD_STOP` the last CAPTURE buffer carries `LAST`. Every
+  picture has already been handed to its coded buffer when `vaEndPicture`
+  returns, so the drain exists only to close the firmware cleanly.
+
 ## 5. Module layout
 
 ```
@@ -208,13 +253,18 @@ src/
     driver.cc         vtable, object tables, init/terminate, one recursive mutex for tables only
     config.cc         profiles/entrypoints from the capability table
     surface.cc        create/destroy/sync/query/export/derive/getImage
-    picture.cc        begin/render/end -> codec translator -> Session::submit
-    image.cc          images and subpictures (minimal)
+    picture.cc        begin/render/end -> codec translator -> Session::submit,
+                      or for an EncSlice context -> EncoderSession::encode
+    image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
     device.{h,cc}     Device interface (ioctl/poll/mmap virtuals) + real implementation;
-                      discovery by `iris_driver` QUERYCAP name, decoder node only
+                      discovery by `iris_driver` QUERYCAP name, decoder and
+                      encoder nodes, roles told apart by which queue carries
+                      the compressed format
     session.{h,cc}    Session: the only ioctl sequencer (state machine of §4),
                       publish dispatch, Import backlog
+    encode.{h,cc}     EncoderSession: configure, one synchronous picture per
+                      call, STOP/drain on finish (§4.1)
     slots.{h,cc}      Frame + SlotPool: allocate, export, requeue, and the
                       Import queue (queue_capture_import, one window slot)
     publish.{h,cc}    CopyEngine interface + CPU engine
@@ -226,13 +276,19 @@ src/
     hevc.cc           VPS/SPS/PPS/RPS synthesis (fix PTL from profile, LTR, non-uniform tiles)
     vp9.cc            raw frame passthrough, superframe for invisible frames
     av1.cc av1_obu.cc VA tiles -> OBU temporal unit
+    encode.h          EncodePicture + Encoder interface shared by both codecs
+    encode_h264.cc    VA encode buffers -> EncodeParams, H.264 menu values
+    encode_hevc.cc    the same for HEVC, Main only
   util/
     options.{h,cc}    every environment variable, read once at init
+    encode-params.h   EncodeParams/RateMode: the contract iris/ and codec/ share
+                      without including each other
     trace.h           stable trace vocabulary (§8); every record ends ` t=<ms>`
     error.h
 test/
   unit/               host-only: slot lifetime, publish policy with FakeDevice, session ordering
-                      with scripted DQBUF/event sequences, codec golden bitstreams
+                      with scripted DQBUF/event sequences, codec golden bitstreams,
+                      encode parameter translation
   iris-*.sh           tablet gates: matrix (framemd5), structure matrix, DRC, soak,
                       browser acceptance, concurrency soak; test/iris-import-probe.cc
                       is the client-owned-buffer acceptance program (§9)
@@ -251,6 +307,7 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LIBVA_V4L2_VIDEO_PATH` | probe | Decoder node override (kept for launcher/packaging compatibility). |
+| `LIBVA_V4L2_ENCODER_PATH` | probe | Encoder node override. When set, a path that is not an Iris encoder is an init error instead of an absent entrypoint. |
 | `V4L2_VA_TRACE` | off | Trace to stderr. |
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface` wait; first frame of a cold session gets `30000`. |
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
@@ -258,7 +315,7 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 | `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1 (qualification runs only). |
 
-Seven switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
+Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
 and `options.cc` in sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -316,9 +373,19 @@ import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
 va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
+va create_context id=<n> profile=<id> <w>x<h> entrypoint=encslice codec=<fourcc>
 va destroy_context id=<n> pending=<n>
+va destroy_context id=<n> entrypoint=encslice frames=<n>
 va begin_picture ctx=<n> surface=<n>
+va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
+va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
+encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr
+            gop=<n> rate=<num>/<den>
+encode frame index=<n> bytes=<n>
+encode drain result=last|timeout
+encode control missing name=<control> id=<hex>        (optional control absent;
+                                                       the session continues)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
 ```
 
@@ -336,6 +403,7 @@ ends with a tag. Gates are commands, not opinions.
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
+| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; `ffmpeg h264_vaapi` and `hevc_vaapi` 1080p with an IRQ delta, decodable output, and the decode matrix re-run unchanged | (in `feat/encode-entrypoints`) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
@@ -369,6 +437,18 @@ holes). Results and the VP9 open failure: TEST-RESULTS.md.
    every submitted picture gets its buffer even after its surface was
    released; a completion whose token does not match its buffer's token
    fails both surfaces and is counted as `misplaced`.
+10. An encoded picture lands only in the coded buffer the client named in
+    `VAEncPictureParameterBuffer{H264,HEVC}::coded_buf`. `vaEndPicture`
+    returning `SUCCESS` means those bytes are already there (plus a
+    `VACodedBufferSegment` they can be read through); a payload larger than
+    the buffer's capacity is `ENCODING_ERROR`, never a truncation.
+11. An encode surface is input only. It never carries a decode target, and
+    the session queues exactly one raw buffer per picture, so a picture
+    cannot be encoded into a buffer that still holds the next one.
+12. An encode profile is advertised only when the encoder node's CAPTURE
+    queue enumerates the codec and its OUTPUT queue enumerates NV12. Both
+    lists come from `data/iris-codec-capabilities.json` and the
+    `encode-qualified-*` block in `src/va/driver.cc` must match it exactly.
 
 ## 11. How work is divided
 

@@ -37,6 +37,7 @@ jobs:
           for required in \
             session \
             hevc-parameter-sets \
+            encode-params \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \

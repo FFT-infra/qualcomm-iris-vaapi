@@ -17,6 +17,8 @@ enum class PublishOverride { Auto, Copy, Direct, Import };
 struct Options {
     // Decoder node override; when empty the node is found by QUERYCAP name.
     std::string video_path;
+    // Encoder node override, same rule.
+    std::string encoder_path;
     bool trace = false;
     // Bounded vaSyncSurface wait. The first frame of a cold session may take
     // firmware bring-up time and gets cold_start_timeout_ms unless the user

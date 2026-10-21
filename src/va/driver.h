@@ -5,11 +5,14 @@
 
 #pragma once
 
+#include "../codec/encode.h"
 #include "../codec/translator.h"
 #include "../iris/alloc.h"
 #include "../iris/device.h"
+#include "../iris/encode.h"
 #include "../iris/publish.h"
 #include "../iris/session.h"
+#include "../util/encode-params.h"
 #include "../util/options.h"
 #include "../util/trace.h"
 
@@ -39,6 +42,8 @@ struct Config {
     VAProfile profile;
     VAEntrypoint entrypoint;
     uint32_t rt_format;
+    // VA_RC_* the client chose for an encode config.
+    uint32_t rate_control = VA_RC_VBR;
 };
 
 struct Surface {
@@ -69,10 +74,23 @@ struct Buffer {
     // Image buffers: which surface's pixels back a derived image.
     VASurfaceID derived_surface = VA_INVALID_ID;
     int acquired_fd = -1;
+    // Derived images alias the surface's DMA-BUF; data stays empty. The
+    // owners keep the pixels alive until vaDestroyImage even if the surface
+    // is reused for another picture in between.
+    void* alias = nullptr;
+    VASurfaceID alias_surface = VA_INVALID_ID;
+    int alias_fd = -1;
+    std::shared_ptr<Surface> alias_owner;
+    std::shared_ptr<iris::Frame> alias_frame;
+    // VAEncCodedBufferType: capacity in `size`, bytes in `payload`, and the
+    // segment list vaMapBuffer hands back.
+    std::vector<uint8_t> payload;
+    VACodedBufferSegment segment = {};
 };
 
 struct Context {
     VAProfile profile;
+    VAEntrypoint entrypoint = VAEntrypointVLD;
     unsigned width = 0, height = 0;
     std::unique_ptr<iris::codec::Translator> translator;
     // Shared so a vaSyncSurface in flight on another thread keeps the
@@ -83,19 +101,37 @@ struct Context {
     VASurfaceID current = VA_INVALID_ID;
     iris::codec::Picture picture;
     iris::codec::AccessUnit au;
+
+    // Encode contexts: the translator and the synchronous V4L2 session are
+    // separate objects; exactly one of translator/session and
+    // encoder/encode_session is set.
+    std::unique_ptr<iris::codec::Encoder> encoder;
+    std::shared_ptr<iris::EncoderSession> encode_session;
+    iris::codec::EncodePicture enc_picture;
+    // A client renders the sequence parameters with the IDR and then stops
+    // (FFmpeg attaches them only to the key picture). Holding the buffer
+    // keeps the bytes valid even after vaDestroyBuffer removed it from the
+    // table; the parameters still describe the stream.
+    std::shared_ptr<Buffer> enc_sequence;
+    uint64_t enc_frames = 0;
+
+    bool encoding() const { return entrypoint == VAEntrypointEncSlice; }
 };
 
-// What the decoder node offered when the driver was initialised.
+// What the decoder and encoder nodes offered when the driver was initialised.
 struct Capabilities {
     std::string node;
-    std::set<uint32_t> output_formats; // V4L2 compressed fourccs
+    std::string encoder_node; // empty when the encoder node is absent
+    std::set<uint32_t> output_formats; // V4L2 compressed fourccs (decode)
+    std::set<uint32_t> encoder_formats; // V4L2 compressed CAPTURE fourccs (encode)
     // Codecs whose Import policy is qualified on hardware
     // (data/iris-codec-capabilities.json, "publish_import"); the session
     // falls back to Copy for anything else.
     std::set<uint32_t> import_formats;
     bool nv12 = false, p010 = false;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
-    std::set<VAProfile> profiles;
+    std::set<VAProfile> profiles; // decode
+    std::set<VAProfile> encode_profiles;
 };
 
 struct DriverData {

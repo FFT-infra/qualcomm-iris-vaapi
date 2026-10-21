@@ -29,6 +29,30 @@
         "non-8-bit or non-4:2:0"
       ],
       "publish_import": "qualified",
+      "encode": {
+        "production": "supported",
+        "va_profiles": [
+          "H264ConstrainedBaseline",
+          "H264Main",
+          "H264High"
+        ],
+        "v4l2_capture_formats": [
+          "H264"
+        ],
+        "raw_formats": [
+          "NV12"
+        ],
+        "rate_control": [
+          "CBR",
+          "VBR"
+        ],
+        "rejected": [
+          "B-frames",
+          "on-demand IDR",
+          "packed headers (Annex-B output only)",
+          "10-bit or non-4:2:0"
+        ]
+      },
       "experimental": []
     },
     {
@@ -52,6 +76,28 @@
         "12-bit"
       ],
       "publish_import": "qualified",
+      "encode": {
+        "production": "supported",
+        "va_profiles": [
+          "HEVCMain"
+        ],
+        "v4l2_capture_formats": [
+          "HEVC"
+        ],
+        "raw_formats": [
+          "NV12"
+        ],
+        "rate_control": [
+          "CBR",
+          "VBR"
+        ],
+        "rejected": [
+          "HEVC Main10",
+          "B-frames",
+          "on-demand IDR",
+          "packed headers (Annex-B output only)"
+        ]
+      },
       "experimental": []
     },
     {
@@ -76,6 +122,16 @@
       ],
       "publish_import": "fallback",
       "import_note": "an alt-ref access unit decodes as two pictures: a one-buffer window stalls ~500 ms per alt-ref, a two-buffer window lets the firmware choose the buffer (153/609 misplaced). Copy until the translator submits one AU per picture",
+      "encode": {
+        "production": "absent",
+        "va_profiles": [],
+        "v4l2_capture_formats": [],
+        "raw_formats": [],
+        "rate_control": [],
+        "rejected": [
+          "the IRIS encoder node exposes no VP9 capture format"
+        ]
+      },
       "experimental": []
     },
     {
@@ -95,6 +151,16 @@
         "large-scale tile"
       ],
       "publish_import": "fallback",
+      "encode": {
+        "production": "absent",
+        "va_profiles": [],
+        "v4l2_capture_formats": [],
+        "raw_formats": [],
+        "rate_control": [],
+        "rejected": [
+          "the IRIS encoder node exposes no AV1 capture format"
+        ]
+      },
       "experimental": [
         "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients time out on hidden frames"
       ]

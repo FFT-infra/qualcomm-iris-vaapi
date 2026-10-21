@@ -48,6 +48,24 @@ std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile)
     }
 }
 
+std::unique_ptr<iris::codec::Encoder> make_encoder(VAProfile profile, iris::RateMode rate_mode)
+{
+    switch (profile) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    case VAProfileH264Baseline:
+#pragma GCC diagnostic pop
+    case VAProfileH264ConstrainedBaseline:
+    case VAProfileH264Main:
+    case VAProfileH264High:
+        return iris::codec::make_h264_encoder(profile, rate_mode);
+    case VAProfileHEVCMain:
+        return iris::codec::make_hevc_encoder(profile, rate_mode);
+    default:
+        throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_PROFILE, "no encoder for profile");
+    }
+}
+
 // Submit one AU for `surface` through `context`'s session. Sets the target's
 // publish policy from the surface's export history.
 void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit& au)
@@ -82,8 +100,29 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         }
         auto c = std::make_shared<Context>();
         c->profile = cfg.profile;
+        c->entrypoint = cfg.entrypoint;
         c->width = static_cast<unsigned>(width);
         c->height = static_cast<unsigned>(height);
+
+        if (cfg.entrypoint == VAEntrypointEncSlice) {
+            c->encoder = make_encoder(
+                cfg.profile, (cfg.rate_control & VA_RC_CBR) ? iris::RateMode::Cbr : iris::RateMode::Vbr);
+            iris::EncodeConfig ec;
+            ec.codec = c->encoder->v4l2_pixelformat();
+            ec.width = c->width;
+            ec.height = c->height;
+            // Open the node here so a missing encoder surfaces at
+            // vaCreateContext rather than at the first vaEndPicture.
+            c->encode_session = std::make_shared<iris::EncoderSession>(
+                iris::open_device(d.options.encoder_path, iris::NodeRole::Encoder), ec, d.options, d.trace);
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            *id = d.next_id++;
+            d.contexts[*id] = c;
+            d.trace("va create_context id=%u profile=%d %ux%u entrypoint=encslice codec=%.4s", *id, cfg.profile,
+                c->width, c->height, reinterpret_cast<const char*>(&ec.codec));
+            return VA_STATUS_SUCCESS;
+        }
+
         c->translator = make_translator(cfg.profile);
 
         iris::SessionConfig sc;
@@ -131,6 +170,27 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             for (auto& [sid, s] : d.surfaces)
                 if (s->owner == id)
                     owned.push_back(s);
+        }
+        if (c->encoding()) {
+            d.trace("va destroy_context id=%u entrypoint=encslice frames=%llu", id,
+                static_cast<unsigned long long>(c->enc_frames));
+            // finish() drains the encoder and tears the queues down; it is
+            // safe when no picture was ever submitted.
+            try {
+                c->encode_session->finish();
+            } catch (const std::exception& error) {
+                d.trace("va destroy_context encode finish failed: %s", error.what());
+            }
+            {
+                std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                d.contexts.erase(id);
+            }
+            for (auto& s : owned)
+                if (s->owner == id)
+                    s->owner = VA_INVALID_ID;
+            c->encode_session.reset();
+            c->encoder.reset();
+            return VA_STATUS_SUCCESS;
         }
         // A translator holding a picture (AV1) releases it now; the session
         // decodes it before draining.
@@ -203,10 +263,30 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             }
             s->owner = id;
             c->current = surface_id;
-            c->picture = {};
-            c->picture.surface_width = s->width;
-            c->picture.surface_height = s->height;
-            c->picture.surface_id = surface_id;
+            if (c->encoding()) {
+                iris::require(s->fourcc == VA_FOURCC_NV12, "encode input must be NV12",
+                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+                // Equal is the common case, but FFmpeg declares an aligned
+                // context (1920x1088) and feeds 1920x1080 frames. A larger
+                // surface is a different picture size, which has no path.
+                iris::require(s->width <= c->width && s->height <= c->height,
+                    "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
+                // Per-picture state; the sequence parameters survive, since
+                // a client may render them with the IDR only.
+                c->enc_picture.picture = nullptr;
+                c->enc_picture.misc.clear();
+                c->enc_picture.surface_width = s->width;
+                c->enc_picture.surface_height = s->height;
+            } else {
+                c->picture = {};
+                c->picture.surface_width = s->width;
+                c->picture.surface_height = s->height;
+                c->picture.surface_id = surface_id;
+            }
+        }
+        if (c->encoding()) {
+            d.trace("va begin_picture ctx=%u surface=%u entrypoint=encslice", id, surface_id);
+            return VA_STATUS_SUCCESS;
         }
         // Reusing the surface: whatever it held is released (the slot goes
         // back to the firmware; a still-pending token is invalidated).
@@ -227,6 +307,37 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         auto c = context(d, id);
         iris::require(c->current != VA_INVALID_ID, "renderPicture outside a picture", VA_STATUS_ERROR_OPERATION_FAILED);
+        if (c->encoding()) {
+            for (int i = 0; i < count; ++i) {
+                auto b = buffer(d, buffers[i]);
+                switch (b->type) {
+                case VAEncSequenceParameterBufferType:
+                    c->enc_sequence = b;
+                    c->enc_picture.sequence = b->data.data();
+                    break;
+                case VAEncPictureParameterBufferType:
+                    c->enc_picture.picture = b->data.data();
+                    break;
+                case VAEncMiscParameterBufferType:
+                    for (unsigned k = 0; k < b->count; ++k)
+                        c->enc_picture.misc.push_back(b->data.data() + static_cast<size_t>(k) * b->size);
+                    break;
+                case VAEncSliceParameterBufferType:
+                    // The firmware decides the slice layout; the client's
+                    // slice parameters only describe what it expects.
+                    break;
+                case VAEncPackedHeaderParameterBufferType:
+                case VAEncPackedHeaderDataBufferType:
+                    // Packed headers are not advertised. A client that
+                    // sends them anyway must not lose the picture.
+                    break;
+                default:
+                    throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE,
+                        "buffer type not accepted by an encode renderPicture");
+                }
+            }
+            return VA_STATUS_SUCCESS;
+        }
         for (int i = 0; i < count; ++i) {
             auto b = buffer(d, buffers[i]);
             switch (b->type) {
@@ -265,6 +376,54 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
         }
         const VASurfaceID current = c->current;
         c->current = VA_INVALID_ID;
+        if (c->encoding()) {
+            // The client named the target buffer in its picture parameters;
+            // nothing about the context decides it.
+            iris::require(c->enc_picture.sequence != nullptr, "encode picture has no sequence parameters",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(c->enc_picture.picture != nullptr, "encode picture has no picture parameters",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const VABufferID coded_id = c->encoder->coded_buf(c->enc_picture);
+            std::shared_ptr<Buffer> coded;
+            iris::StableBuffer* stable = nullptr;
+            {
+                std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                iris::require(coded_id != VA_INVALID_ID, "encode picture names no coded buffer",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+                coded = buffer(d, coded_id);
+                iris::require(coded->type == VAEncCodedBufferType, "coded_buf is not a coded buffer",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+                stable = &ensure_stable(d, *s);
+            }
+            // Translation and the V4L2 transaction run outside the table
+            // lock: unlike a decode submit, the encode blocks until the
+            // firmware returns the access unit.
+            const iris::EncodeParams params = c->encoder->translate(c->enc_picture);
+            if (!c->encode_session->configured()) {
+                c->encode_session->configure(params, s->width, s->height);
+            } else {
+                // The encoder has no SOURCE_CHANGE: one geometry per context.
+                iris::require(c->encode_session->config().width == s->width
+                        && c->encode_session->config().height == s->height,
+                    "encode surface changed size", VA_STATUS_ERROR_INVALID_SURFACE);
+            }
+            c->enc_frames++;
+            iris::EncodeResult result = c->encode_session->encode(stable->fd(), stable->size(), params);
+            iris::require(result.bytes.size() <= coded->size, "coded buffer is too small",
+                VA_STATUS_ERROR_ENCODING_ERROR);
+            {
+                std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                coded->payload = std::move(result.bytes);
+                coded->segment.size = static_cast<uint32_t>(coded->payload.size());
+                coded->segment.bit_offset = 0;
+                coded->segment.status = 0;
+                coded->segment.buf = coded->payload.empty() ? nullptr : coded->payload.data();
+                coded->segment.next = nullptr;
+            }
+            d.trace("va end_picture ctx=%u surface=%u entrypoint=encslice bytes=%zu", id, current,
+                coded->payload.size());
+            return VA_STATUS_SUCCESS;
+        }
         // The VA buffers referenced by c->picture stay valid until the
         // client destroys them, which VA forbids before vaEndPicture returns.
         try {

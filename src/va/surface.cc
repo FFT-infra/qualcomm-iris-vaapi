@@ -220,7 +220,9 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     // the profile can decode into rather than the one the config defaulted to.
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
-    if (d.capabilities.p010 && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
+    // The encoder's raw port is NV12 only; P010 is a decode-only format here.
+    const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
+    if (!encoding && d.capabilities.p010 && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     add(VASurfaceAttribMinWidth, static_cast<int>(d.capabilities.min_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);

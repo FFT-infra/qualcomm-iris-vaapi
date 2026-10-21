@@ -37,6 +37,18 @@ Firefox 用的是同一个驱动，也都欢迎，只是它们本来就有各自
 标志为真、30 秒窗口内有解码帧数且零丢帧。节点被打开、GPU 进程在跑，这些都
 不算证据。
 
+同一个 display 也提供 `VAEntrypointEncSlice`，走内核在解码节点旁边暴露的编码
+节点。Chrome 不用它，用它的是 FFmpeg、GStreamer，以及任何向 libva 要编码
+entrypoint 的程序。
+
+| 编码 | Entrypoint | 输入 | 输出 | 验证 |
+| --- | --- | --- | --- | --- |
+| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`，CBR 或 VBR | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`，IRQ 计数有增量且码流可解码（TEST-RESULTS.md） |
+| HEVC Main | `VAEntrypointEncSlice`，CBR 或 VBR | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`，IRQ 计数有增量且码流可解码（TEST-RESULTS.md） |
+
+"硬件编码"的标准：这轮跑完 Iris 的 IRQ 计数有增量、码流解码无错误、SPS 里
+的 profile、level 和分辨率与请求一致。一个 VA context 只返回了字节，不算证据。
+
 ## 需要什么
 
 - 带 `qcom-iris` 解码器的 SoC（HFI gen2；SM8550 是合格过的那一个），aarch64。
@@ -131,6 +143,21 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
 - 三个 HEVC 一致性测试向量（`DELTAQP_A_BRCM_4`、`INITQP_B_Main10_Sony_1`、
   `PMERGE_E_TI_3`）每帧都解完、固件无报错，但像素有差异，还没追。
+- **编码不能按需出 IDR。** 节点没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，
+  固件能力表里也没有 RAP 控制项，关键帧只能靠 GOP 长度。从 GOP 中间切开，
+  流要等到下一个 IDR 才能播。
+- **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
+  的模型。序列参数里 `ip_period > 1` 的 context 直接返回
+  `VA_STATUS_ERROR_INVALID_PARAMETER`。
+- **不支持 10-bit、VP9、AV1 编码。** 编码节点的 OUTPUT 队列只列 NV12 和
+  QC08C，HEVC Main10 和 VP9 Profile 2 喂不进去。
+- **只有 Annex-B。** 驱动不声明 packed headers，SPS/PPS 由固件自己写，所以
+  编码 context 没有 extradata。直接输出 `.h264` / `.hevc` 没问题，要封装成
+  MP4 需要再 remux（`ffmpeg -i out.h264 -c copy out.mp4`）。
+- **一个 context 同时只编一张图。** `vaEndPicture` 同步跑完整个 V4L2 事务，
+  VA context 的分辨率又是固定的：换分辨率要新建 context。
+- **不支持 multi-slice、tiles、ROI 和 `-max_frame_size`。** FFmpeg 请求这些
+  会直接报错，不会被静默忽略。
 
 ## 开发
 
@@ -173,6 +200,7 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `LIBVA_V4L2_VIDEO_PATH` | 自动探测 | 指定解码节点，不再扫描 `/dev/video*` 找 `iris_driver` 解码器。 |
+| `LIBVA_V4L2_ENCODER_PATH` | 自动探测 | 指定编码节点，不再扫描 `/dev/video*` 找 `iris_driver` 编码器。指到非 Iris 编码节点会让 display 初始化失败。 |
 | `V4L2_VA_TRACE` | 关 | 在 stderr 上输出逐帧 trace，任何值都表示开启。记录格式见 `docs/architecture.md`。 |
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | `vaSyncSurface()` 的等待上限，`50..60000`。不覆盖时，冷会话的第一帧最多等 `30000` ms 让固件起来。 |
 | `V4L2_VA_COPY` | `gpu` | 往客户端预先导出的 surface 里发布画面时用的引擎：`gpu`（Adreno 上的 EGL blit）或 `cpu`。 |
