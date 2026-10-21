@@ -31,7 +31,7 @@ Firefox 用的是同一个驱动，也都欢迎，只是它们本来就有各自
 | HEVC Main | 硬件解码 | Import，零拷贝 | 逐帧 MD5 一致；Fluster JCT-VC-HEVC_V1 111/147（固件 112） |
 | HEVC Main10（P010） | 硬件解码 | Import，零拷贝 | 10-bit 逐帧 MD5 一致 |
 | VP9 Profile 0 / 2 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，8-bit 和 10-bit |
-| AV1 | 不对外声明 | 仅手动开启 | OBU 重组逐比特一致，但 VA 客户端会在隐藏帧上超时（见限制） |
+| AV1 | 不对外声明 | 仅手动开启 | OBU 重组逐比特一致，但 VA 客户端第一个画面就失败（见限制） |
 
 "硬件解码"的标准：Chrome 的 media 面板报告 `VaapiVideoDecoder`、平台解码器
 标志为真、30 秒窗口内有解码帧数且零丢帧。节点被打开、GPU 进程在跑，这些都
@@ -43,8 +43,8 @@ entrypoint 的程序。
 
 | 编码 | Entrypoint | 输入 | 输出 | 验证 |
 | --- | --- | --- | --- | --- |
-| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`，CBR 或 VBR | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`，IRQ 计数有增量且码流可解码（TEST-RESULTS.md） |
-| HEVC Main | `VAEntrypointEncSlice`，CBR 或 VBR | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`，IRQ 计数有增量且码流可解码（TEST-RESULTS.md） |
+| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`，CBR、VBR 或 CQP | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`，300 帧 GOP60 验收（TEST-RESULTS.md） |
+| HEVC Main | `VAEntrypointEncSlice`，CBR、VBR 或 CQP | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`，300 帧 GOP60 验收（TEST-RESULTS.md） |
 
 "硬件编码"的标准：这轮跑完 Iris 的 IRQ 计数有增量、码流解码无错误、SPS 里
 的 profile、level 和分辨率与请求一致。一个 VA context 只返回了字节，不算证据。
@@ -126,10 +126,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   一个缓冲区时，每遇到一次 alt-ref 会话就卡约 500 ms；挂两个时固件自己挑
   缓冲区，大约四分之一的完成结果落错位置。要等翻译器做到一张图一个访问
   单元之后才能换 Import。
-- **AV1 只能手动开。** 隐藏帧（`show_frame=0`）固件不返回 CAPTURE 缓冲区，
-  VA 又没有 `show_existing_frame` 这种调用，所以带 alt-ref 的流会让 VA 客户端
-  超时。OBU 重组在 `test/av1-obu-roundtrip.sh` 下逐比特一致；
-  `V4L2_VA_EXPERIMENTAL_PROFILES=1` 只用于验证时声明该 profile。
+- **AV1 只能手动开，而且在 VA 上解不出来。** 隐藏帧（`show_frame=0`）固件不返回
+  CAPTURE 缓冲区，VA 又没有 `show_existing_frame` 这种调用；另外翻译器要拿到下一帧
+  的参考表才能补出 `refresh_frame_flags`，所以每张图都要压后一帧提交，客户端下载时
+  这张表面还没有像素。两个问题都在每路流的第一个画面就出现。OBU 重组在
+  `test/av1-obu-roundtrip.sh` 下逐比特一致；实际使用走原生 V4L2（`v4l2av1dec`）。
+  `V4L2_VA_EXPERIMENTAL_PROFILES=1` 只在验证时声明该 profile。
 - **原版内核上 Chrome 走 Copy。** 没有解码顺序控制项时会话运行在显示顺序
   模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空，Import 被拒绝。
 - **Chrome 153 的 HEVC seek 回归，上游问题。** Chromium 153 默认打开了

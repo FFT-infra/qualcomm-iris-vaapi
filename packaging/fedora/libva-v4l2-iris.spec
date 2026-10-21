@@ -30,7 +30,7 @@
 Name:           libva-v4l2-iris
 Version:        0.1.0
 Release:        1%{?dist}
-Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder
+Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
 
 # The backend carries both licences; see COPYING, COPYING.LGPL and COPYING.MIT.
 License:        MIT AND LGPL-2.1-or-later
@@ -61,9 +61,10 @@ Requires:       v4l-utils
 Suggests:       chromium
 
 %description
-A libVA backend that drives the Qualcomm Iris V4L2 stateful decoder, so
-VA-API clients such as Chromium and Google Chrome can decode H.264 and HEVC
-in hardware instead of falling back to a CPU decoder.
+A libVA backend that drives the Qualcomm Iris V4L2 stateful decoder and
+encoder, so VA-API clients such as Chromium, Google Chrome and FFmpeg can
+decode and encode H.264 and HEVC in hardware instead of falling back to a
+CPU codec.
 
 The package installs the driver into libva's driver directory, a browser
 launcher that resolves the Iris decoder node at runtime, and desktop entries

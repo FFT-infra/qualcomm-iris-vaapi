@@ -44,7 +44,8 @@
         ],
         "rate_control": [
           "CBR",
-          "VBR"
+          "VBR",
+          "CQP"
         ],
         "rejected": [
           "B-frames",
@@ -89,7 +90,8 @@
         ],
         "rate_control": [
           "CBR",
-          "VBR"
+          "VBR",
+          "CQP"
         ],
         "rejected": [
           "HEVC Main10",
@@ -147,6 +149,7 @@
       "fallback": "native-v4l2-or-software",
       "rejected": [
         "hidden (show_frame=0) pictures: the firmware returns no CAPTURE for them and VA has no show_existing_frame call",
+        "every stream fails at the first picture: VA AV1 carries no refresh_frame_flags, so the translator holds each picture until its successor arrives, and the firmware returns a CAPTURE only after the next AU is queued",
         "film grain",
         "large-scale tile"
       ],
@@ -162,7 +165,7 @@
         ]
       },
       "experimental": [
-        "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients time out on hidden frames"
+        "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients fail at the first picture (see rejected)"
       ]
     }
   ]

@@ -1020,6 +1020,33 @@ needs either firmware/kernel support for returning hidden pictures (a
 `DISPLAY_DELAY`-style control for AV1) or a VA client contract that
 tolerates missing completions; neither is a driver change.
 
+### AV1 recheck on the encode branch (2026-10-22)
+
+Re-run against `3b91519` with the same build as the encode section
+(`v4l2_drv_video.so` SHA-256
+`bb4549260f2c6d7b021889d3222e386cfe19735ea61282d93cf97c9e577daed9`,
+FFmpeg 8.1.3, 320x240, 30 frames, `V4L2_VA_SYNC_TIMEOUT_MS=500`). The
+failure comes before the hidden-frame gap and is not specific to alt-ref
+streams:
+
+| Clip | Result |
+| --- | --- |
+| libaom default (`auto-alt-ref` on) | `Error processing packet in decoder: Input/output error`, no frames |
+| `-lag-in-frames 0 -auto-alt-ref 0` | same error at the first download, no frames |
+
+The trace pins it at picture one: `va end_picture … deferred` is followed
+by `va error where=getImage … surface has no decoded pixels`, and the
+translator releases that picture only when its successor arrives
+(`submit token=1`). The one-picture hold is not removable — the VA AV1
+picture buffer carries no `refresh_frame_flags`, and the slot a picture
+writes is only visible in the next picture's reference map. Separately,
+the one access unit that was submitted produced no CAPTURE before STOP
+(`drain complete … output_queued=0`), the firmware deferral recorded
+above.
+
+AV1 VA decode therefore fails on the first picture of every stream on
+this firmware, alt-ref or not. The conclusion is unchanged: opt-in only.
+
 ## Phase 6: trimmed tree, packaged, installed (2026-09-20)
 
 The tree now contains only what the rebuilt driver ships (commit `069a58c`
@@ -1332,7 +1359,10 @@ Every stream decodes with `ffmpeg -v error -i <out> -f null -` and reports
 the requested geometry, profile and level:
 
 - H.264 VBR: High, level 4.0, 1920x1080, 300 frames. Key frames at 0, 61,
-  122, 183, 244 (the firmware counts the GOP from the IDR).
+  122, 183, 244: the firmware counts the IDR inside `GOP_SIZE`, so
+  programming `intra_period` directly put them one frame late. The session
+  now programs `intra_period - 1`; the acceptance run below shows
+  0, 60, 120, 180, 240.
 - H.264 CBR with `-profile:v high -level 4.1`: High, level 4.1,
   1920x1080, 300 frames. The byte count is 3.99 Mbit/s over the 10 s of
   content, which is the requested CBR target.
@@ -1395,3 +1425,120 @@ process. That is a pre-existing sandbox boundary, not an encode change.
   frames. The encoder geometry therefore comes from the input surface,
   with the context as the upper bound; a later surface of a different
   size is rejected because the node has no `SOURCE_CHANGE`.
+
+### Piano acceptance: CQP, GOP cadence, decoded pixels (2026-10-22)
+
+The piano project's `scripts/verify-device-media.py` is the acceptance
+bar this driver has to clear: 300 frames of 1080p H.264 and HEVC through
+`h264_vaapi`/`hevc_vaapi` with no `-b:v` (FFmpeg selects CQP), MP4
+output, key frames at 0/60/120/180/240, and 300 decoded frames whose
+per-frame MD5 matches a software decode. The driver failed it twice
+before this run: `VA_RC_CQP` was not advertised, so the encoder would
+not open at all, and the IDRs landed at 61/122/... with `-g 60`.
+
+With CQP, the `intra_period - 1` GOP mapping, and the CAPTURE format
+re-set after the rate-control controls, on the same target:
+
+| Run | Result |
+| --- | --- |
+| `h264_vaapi`, 1920x1080, no bitrate, `-bf 0 -g 60`, 300 frames, MP4 | 17,138,094 bytes, Iris IRQ +610, key frames 0/60/120/180/240 |
+| `hevc_vaapi`, the same | 13,171,327 bytes, Iris IRQ +609, the same key frames |
+| `h264_v4l2m2m` decode of the H.264 file | 300 frames, every frame MD5 equal to the software decode, Iris IRQ +614 |
+| `h264_v4l2m2m` decode of the HEVC file | 300 frames, MD5 equal, Iris IRQ +840 |
+| `ffmpeg -hwaccel vaapi` (this driver) decode of the H.264 file | 300 frames, MD5 equal |
+
+Source `3b91519` plus the CQP/GOP change (uncommitted at the time of the
+run), driver `build-encode/src/v4l2_drv_video.so` SHA-256
+`5805975ab3338e4ebcefac6c126546bb0be015eb8c213be5fb983f3a53d28b33`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged).
+
+CQP honors the client QP: 60 frames of 1080p H.264 are 5,445,355 bytes
+at `-q:v 10`, 3,398,734 at the default and 244,736 at `-q:v 45`. FFmpeg
+still warns that no packed headers are advertised; MP4 muxing succeeds
+because the muxer derives `avcC`/`hvcC` from the Annex-B parameter sets
+in the stream, but the encoder offers no extradata at open time.
+
+Not covered: a per-picture IDR request (`-force_key_frames`, seeks). The
+running kernel has no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so the
+periodic IDR is the only keyframe source.
+
+## Decode throughput and the build type (2026-10-22)
+
+A user-space cost measurement taken while investigating decode throughput.
+The clips are `/tmp/iris-enc/media/clip-{hevc,h264}.mp4`: 1920x1080, 900
+frames, decoded 300 frames each with `-hwaccel vaapi
+-hwaccel_output_format vaapi -f null`, so the frames stay on the VA surface
+and nothing is downloaded. Wall clock and CPU come from `-benchmark`; the
+native rows are `-c:v {hevc,h264}_v4l2m2m` timed with the shell.
+
+| Decoder | HEVC rtime / utime | H.264 rtime / utime |
+| --- | --- | --- |
+| This driver, `buildtype=debug` (`-O0`) | 6.569 s / 5.458 s | 1.132 s / 0.945 s |
+| This driver, `buildtype=debugoptimized` (`-O2`) | 0.453 s / 0.279 s | 0.515 s / 0.123 s |
+| Installed RPM driver (2026-09-02, `-O2`) | 0.607 s / 0.462 s | 0.514 s / 0.131 s |
+| `hevc_v4l2m2m` / `h264_v4l2m2m` | 0.624 s / 0.168 s | 0.673 s / 0.146 s |
+
+The same driver source at `-O0` is 14x slower on HEVC and 2.2x on H.264.
+On the whole 900-frame clip the optimised driver holds 778 fps on HEVC
+(1.156 s) and 637 fps on H.264 (1.414 s).
+Temporary timers inside `vaEndPicture` located the cost in
+`translator->translate` itself: 10.4 ms per HEVC frame at `-O0` against
+0.62 ms at `-O2`, with `submit` at 0.96 ms against 0.39 ms. The
+instrumentation was removed after the measurement.
+
+Meson's own default is `-O0`, so `meson setup build` as documented in the
+README produced an unoptimised driver. `meson.build` now sets
+`default_options: ['buildtype=debugoptimized']`. The installed RPM was
+built by rpmbuild's own flags and is optimised, so no browser result in
+this file changes; only source-tree builds were affected.
+
+Driver `build-def/src/v4l2_drv_video.so` SHA-256
+`9e2ecbafcd49dafcf17e23782b66bbf5d82e08d9ea8b8de5483d495aa4c256b8`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, decoder node resolved by
+`iris_driver` name as before.
+
+### 4K HEVC slice rewrite (2026-10-22)
+
+The 1080p throughput above hid a second problem. Synthetic 4K clips
+(testsrc2 3840x2160: H.264 from `libx264 -preset ultrafast -qp 20`,
+HEVC from `libx265 -preset ultrafast crf=22 keyint=60`) decoded 60
+frames bit-exactly through the VA path, with `hwdownload,format=nv12`
+and `format=nv12` on the reference decode so both sides hash the same
+layout:
+
+| Clip | VA frames matching software |
+| --- | --- |
+| 4K H.264, 60 frames | 60/60 |
+| 4K HEVC, 60 frames | 60/60 |
+
+Throughput was not. Ten copies of the HEVC clip concatenated (600
+frames, about 140 KB per slice) took 10.75 s, 9.06 s of it user CPU:
+56 fps against 233 fps for `hevc_v4l2m2m` on the same file.
+`HEVC::rewrite_slice` re-emits every slice because the original RPS
+cannot be reproduced by a generated SPS, and it did that one bit at a
+time through `BitWriter::bit` — 1.1 million calls per frame at that
+size.
+
+`BitReader::copy` now takes a whole-byte path when the reader position
+and the writer are both byte-aligned, through a new `BitWriter::append`;
+the reader also reserves the NAL size up front. The same 600 frames:
+
+| | rtime | utime | fps |
+| --- | --- | --- | --- |
+| Before | 10.750 s | 9.060 s | 56 |
+| After | 3.447 s | 2.581 s | 172 |
+| `hevc_v4l2m2m` | 2.572 s | 0.775 s | 233 |
+
+Timers inside `vaEndPicture` put `translate` at 0.15 ms per 4K frame
+with the clocks at their initial state and 1.5 ms after twenty seconds
+of decoding, against 14 ms before the change; the part of the process
+CPU that remains beyond the driver is FFmpeg's own VA-API HEVC parsing.
+`test/hevc-parameter-sets-test.cc` now compares the fast path against a
+per-bit copy over 18 spans, aligned and unaligned, before the driver is
+allowed to use it.
+
+Driver `build-def/src/v4l2_drv_video.so` SHA-256
+`d824cd5624c085ce210fa14f882363afe5dd4c2be3448afbe1e918c71f8d65f3`,
+same kernel and boot ID as above.

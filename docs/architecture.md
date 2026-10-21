@@ -27,8 +27,8 @@ on the encoder node the kernel exposes next to the decoder. Encode is a
 second entrypoint, not a second product: it exists so FFmpeg's `h264_vaapi`
 and `hevc_vaapi` (and anything else that asks a VA display for an encode
 entrypoint) can use the VPU without a second display or a second driver.
-Scope: H.264 Constrained Baseline/Main/High and HEVC Main, CBR or VBR, NV12
-input, Annex-B output, one picture in flight per context.
+Scope: H.264 Constrained Baseline/Main/High and HEVC Main, CBR, VBR or CQP,
+NV12 input, Annex-B output, one picture in flight per context.
 
 Non-goals: being a generic backend for stateless request-API decoders (that
 is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
@@ -237,6 +237,16 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
 - Controls that are not dynamic return `EINVAL` while OUTPUT streams.
   `BITRATE`, `BITRATE_PEAK` and `GOP_SIZE` are dynamic and are re-applied
   per picture; everything else is written once, in `configure`.
+- `GOP_SIZE` counts the I frame inside its period: programming N puts the
+  next IDR at frame N+1. VA's `intra_period` is the distance between I
+  frames, so the session writes `intra_period - 1`. Without a kernel
+  `FORCE_KEY_FRAME` control the periodic IDR is the only keyframe source; a
+  client's per-picture IDR request cannot be honored.
+- CQP turns firmware rate control off (`FRAME_RC_ENABLE=0`) and writes the
+  I/P QP controls from `pic_init_qp` plus the first slice's delta. Iris
+  sizes the coded queue from the current controls, so `configure` re-sets
+  the CAPTURE format after the controls and before `REQBUFS`; a format set
+  earlier leaves buffers that `QBUF` rejects with `EINVAL` at 1080p.
 - An OUTPUT `QBUF` with `bytesused == 0` is rejected and poisons the
   instance, so the session passes the plane length.
 - The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
@@ -380,7 +390,7 @@ va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
-encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr
+encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n>
 encode drain result=last|timeout
@@ -403,7 +413,7 @@ ends with a tag. Gates are commands, not opinions.
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
-| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; `ffmpeg h264_vaapi` and `hevc_vaapi` 1080p with an IRQ delta, decodable output, and the decode matrix re-run unchanged | (in `feat/encode-entrypoints`) |
+| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged | (in `feat/encode-entrypoints`) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.

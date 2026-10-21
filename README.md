@@ -35,7 +35,7 @@ Chrome 152.
 | HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 111/147 (firmware 112) |
 | HEVC Main10 (P010) | hardware decoder | Import, zero-copy | frame MD5 equal at 10-bit |
 | VP9 Profile 0 / 2 | hardware decoder | GPU blit (see limits) | frame MD5 equal, 8- and 10-bit |
-| AV1 | not advertised | opt-in only | OBU rebuild bit-exact, but VA clients time out on hidden frames (see limits) |
+| AV1 | not advertised | opt-in only | OBU rebuild bit-exact, but VA clients fail at the first picture (see limits) |
 
 "Hardware decoder" means Chrome's media surface reports `VaapiVideoDecoder`
 with the platform flag set and a decoded-frame count over a 30 s window with
@@ -47,8 +47,8 @@ GStreamer and anything else that asks libva for an encode entrypoint do.
 
 | Codec | Entrypoint | Input | Output | Verification |
 | --- | --- | --- | --- | --- |
-| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`, CBR or VBR | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`, IRQ delta and a decodable stream (TEST-RESULTS.md) |
-| HEVC Main | `VAEntrypointEncSlice`, CBR or VBR | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`, IRQ delta and a decodable stream (TEST-RESULTS.md) |
+| H.264 Constrained Baseline / Main / High | `VAEntrypointEncSlice`, CBR, VBR or CQP | NV12 | Annex-B | 1080p `ffmpeg h264_vaapi`, 300-frame GOP-60 acceptance (TEST-RESULTS.md) |
+| HEVC Main | `VAEntrypointEncSlice`, CBR, VBR or CQP | NV12 | Annex-B | 1080p `ffmpeg hevc_vaapi`, 300-frame GOP-60 acceptance (TEST-RESULTS.md) |
 
 "Hardware encode" means the run moved the Iris IRQ counter, the bitstream
 decodes without errors, and its SPS matches the requested profile, level and
@@ -142,10 +142,13 @@ publishing. The contract, the state machine and the trace vocabulary are in
   per alt-ref; with two, the firmware chooses the buffer itself and about a
   quarter of the completions land in the wrong one. Copy until the
   translator submits one access unit per picture.
-- **AV1 is opt-in.** The firmware returns no CAPTURE buffer for hidden
-  (`show_frame=0`) pictures and VA has no `show_existing_frame` call, so VA
-  clients time out on streams with alt-ref frames. The OBU rebuild is
-  bit-exact under `test/av1-obu-roundtrip.sh`;
+- **AV1 is opt-in and does not decode through VA here.** The firmware
+  returns no CAPTURE buffer for hidden (`show_frame=0`) pictures and VA has
+  no `show_existing_frame` call; on top of that, the translator must hold
+  each picture until the next one to recover `refresh_frame_flags`, so a
+  client downloads a surface before its picture is submitted. Both failures
+  hit the first picture of every stream. The OBU rebuild is bit-exact under
+  `test/av1-obu-roundtrip.sh`; use native V4L2 (`v4l2av1dec`) instead.
   `V4L2_VA_EXPERIMENTAL_PROFILES=1` advertises the profile for qualification
   only.
 - **Stock kernel means Copy for Chrome.** Without the decode-order control
