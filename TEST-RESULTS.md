@@ -2010,3 +2010,8 @@ Source `227dfea`, driver SHA-256
   `build-tree:d11df8030e61`, boot unchanged. A run without `--driver` also
   passes, on the installed package `df16127ccecf`; that one is the
   package's own record, not this tree's.
+
+The same request pattern ran ten more times in one session (five H.264,
+five HEVC, 120 frames each): every run exited 0, decoded cleanly and
+carried the same five IDRs, so the lever's per-picture control write does
+not drift the firmware's schedule across sessions.
