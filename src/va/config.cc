@@ -81,8 +81,9 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = (decode || encode) ? d.capabilities.max_height : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribRateControl:
-            // VBR is FFmpeg's default; CBR when bitrate == maxrate.
-            attributes[i].value = encode ? (VA_RC_CBR | VA_RC_VBR) : VA_ATTRIB_NOT_SUPPORTED;
+            // CQP is what FFmpeg picks when the client gives no bitrate;
+            // CBR when bitrate == maxrate, VBR otherwise.
+            attributes[i].value = encode ? (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP) : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxRefFrames:
             // l0 in the low 16 bits, l1 in the high half. Two L0 references,
@@ -129,8 +130,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
         if (entrypoint == VAEntrypointEncSlice) {
             // One bit, chosen by the client from what getConfigAttributes
             // advertised.
-            iris::require((rate_control & (VA_RC_CBR | VA_RC_VBR)) != 0, "unsupported rate control mode",
-                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require((rate_control & (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP)) != 0,
+                "unsupported rate control mode", VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(rt_format & VA_RT_FORMAT_YUV420, "encode needs YUV420",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         } else {

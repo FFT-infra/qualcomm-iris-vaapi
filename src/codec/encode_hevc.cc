@@ -116,6 +116,15 @@ public:
             }
         }
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
+        require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (out.rate_mode == RateMode::Cqp) {
+            int qp = params->pic_init_qp;
+            if (!picture.slices.empty())
+                qp += static_cast<const VAEncSliceParameterBufferHEVC*>(picture.slices.front())->slice_qp_delta;
+            require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
+            out.qp = qp;
+        }
         return out;
     }
 

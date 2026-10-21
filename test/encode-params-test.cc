@@ -114,6 +114,18 @@ void test_h264_translation()
     check(cbr_params.profile == V4L2_MPEG_VIDEO_H264_PROFILE_MAIN, "H.264 Main profile");
     check(cbr_params.rate_mode == RateMode::Cbr, "CBR rate mode");
     check(cbr_params.peak_bitrate == cbr_params.bitrate, "CBR peak equals the target");
+
+    // CQP has no bitrate: the QP comes from the picture plus its slice
+    // delta, which is exactly what the bitstream carries.
+    auto cqp = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cqp);
+    VAEncSliceParameterBufferH264 slice = {};
+    slice.slice_qp_delta = 2;
+    EncodePicture cqp_input = h264_input(sequence, picture);
+    cqp_input.slices = { &slice };
+    const iris::EncodeParams cqp_params = cqp->translate(cqp_input);
+    check(cqp_params.rate_mode == RateMode::Cqp, "CQP rate mode");
+    check(cqp_params.qp == 28, "CQP QP combines the picture and the slice delta");
+    check(cqp_params.peak_bitrate == 0, "CQP sends no peak bitrate");
 }
 
 void test_h264_rounding_and_rejections()
@@ -141,6 +153,12 @@ void test_h264_rounding_and_rejections()
 
     EncodePicture missing;
     check(throws([&] { encoder->translate(missing); }), "a picture without parameters is rejected");
+
+    auto cqp = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cqp);
+    VAEncPictureParameterBufferH264 no_qp = h264_picture();
+    no_qp.pic_init_qp = 0;
+    check(throws([&] { cqp->translate(h264_input(h264_sequence(), no_qp)); }),
+        "CQP without a picture QP is rejected");
 }
 
 VAEncSequenceParameterBufferHEVC hevc_sequence()
@@ -177,6 +195,18 @@ void test_hevc_translation()
     check(params.bitrate == 4000000, "HEVC bitrate from the sequence");
     check(params.gop_size == 60, "HEVC GOP");
     check(encoder->coded_buf(input) == picture.coded_buf, "HEVC coded buffer");
+
+    auto cqp = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Cqp);
+    VAEncPictureParameterBufferHEVC qp_picture = {};
+    qp_picture.pic_init_qp = 30;
+    EncodePicture cqp_input;
+    cqp_input.sequence = &sequence;
+    cqp_input.picture = &qp_picture;
+    cqp_input.surface_width = 1920;
+    cqp_input.surface_height = 1080;
+    const iris::EncodeParams cqp_params = cqp->translate(cqp_input);
+    check(cqp_params.rate_mode == RateMode::Cqp, "HEVC CQP rate mode");
+    check(cqp_params.qp == 30, "HEVC CQP QP");
 
     // 93 is 3.1; 100 is between 3.1 and 4 and must round down.
     sequence.general_level_idc = 93;

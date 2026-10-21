@@ -135,8 +135,18 @@ public:
             }
         }
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
-        require(out.bitrate > 0 || out.rate_mode == RateMode::Vbr, "CBR needs a bitrate",
+        require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
+        // CQP has no bitrate: the picture QP is what the bitstream carries,
+        // pic_init_qp plus the first slice's delta (the firmware writes one
+        // slice covering the picture).
+        if (out.rate_mode == RateMode::Cqp) {
+            int qp = params->pic_init_qp;
+            if (!picture.slices.empty())
+                qp += static_cast<const VAEncSliceParameterBufferH264*>(picture.slices.front())->slice_qp_delta;
+            require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
+            out.qp = qp;
+        }
         return out;
     }
 

@@ -10,7 +10,10 @@
 
 namespace iris {
 
-enum class RateMode { Vbr, Cbr };
+// Cqp is constant-quality: the firmware's rate control is off and the
+// per-frame QP controls decide the size. FFmpeg picks it when the client
+// gives no bitrate, so a driver that omits it cannot open the encoder.
+enum class RateMode { Vbr, Cbr, Cqp };
 
 struct EncodeParams {
     // V4L2 menu values (V4L2_MPEG_VIDEO_*_PROFILE and *_LEVEL). A negative
@@ -23,6 +26,9 @@ struct EncodeParams {
     uint32_t gop_size = 0; // 0 asks the firmware for intra only
     unsigned frame_rate_num = 30;
     unsigned frame_rate_den = 1;
+    // CQP only: the picture's QP, already combined with its slice delta.
+    // < 0 when the client runs rate control instead.
+    int qp = -1;
     int min_qp = -1; // < 0 leaves the firmware default
     int max_qp = -1;
     bool cabac = true; // H.264 only; HEVC is always CABAC

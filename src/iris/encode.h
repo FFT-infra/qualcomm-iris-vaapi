@@ -70,6 +70,7 @@ private:
 
     void apply_dynamic(const EncodeParams& params);
     void set_control(uint32_t id, int32_t value, const char* name);
+    void set_frame_qp(int qp);
     void reclaim_output(Clock::time_point deadline);
     std::optional<Dequeued> wait_capture(Clock::time_point deadline);
     int sync_timeout_ms() const;

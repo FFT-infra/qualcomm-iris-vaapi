@@ -32,7 +32,25 @@ int bitrate_mode(RateMode mode)
     return mode == RateMode::Cbr ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
 }
 
-const char* rate_mode_name(RateMode mode) { return mode == RateMode::Cbr ? "cbr" : "vbr"; }
+// Iris counts the I frame inside GOP_SIZE: a value of 60 puts the next IDR
+// at frame 61, while VA's intra_period is the distance between I frames.
+// Program one less; 0 asks the firmware for intra-only.
+int32_t gop_control(uint32_t intra_period)
+{
+    return static_cast<int32_t>(intra_period ? intra_period - 1 : 0);
+}
+
+const char* rate_mode_name(RateMode mode)
+{
+    switch (mode) {
+    case RateMode::Cbr:
+        return "cbr";
+    case RateMode::Cqp:
+        return "cqp";
+    default:
+        return "vbr";
+    }
+}
 
 } // namespace
 
@@ -124,17 +142,24 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
             set_control(V4L2_CID_MPEG_VIDEO_HEVC_LEVEL, params.level, "hevc level");
     }
 
-    set_control(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1, "frame rc enable");
-    set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
-    set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "b frames");
-    set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, static_cast<int32_t>(params.gop_size), "gop size");
-    if (params.bitrate)
-        set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
-    if (params.rate_mode == RateMode::Cbr) {
-        const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
-        if (peak)
-            set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
+    const bool cqp = params.rate_mode == RateMode::Cqp;
+    require(!cqp || params.qp >= 1, "CQP needs a picture QP", VA_STATUS_ERROR_INVALID_PARAMETER);
+    set_control(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, cqp ? 0 : 1, "frame rc enable");
+    if (cqp) {
+        // Rate control off: the I/P QP controls decide every picture.
+        set_frame_qp(params.qp);
+    } else {
+        set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
+        if (params.bitrate)
+            set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
+        if (params.rate_mode == RateMode::Cbr) {
+            const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
+            if (peak)
+                set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
+        }
     }
+    set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "b frames");
+    set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
     if (params.min_qp >= 0)
         set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_MIN_QP : V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP, params.min_qp,
             "min qp");
@@ -151,6 +176,15 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
     // carries the operating rate, which only affects clocking.
     device_->set_frame_rate(Queue::Capture, params.frame_rate_num, params.frame_rate_den);
     device_->set_frame_rate(Queue::Output, params.frame_rate_num, params.frame_rate_den);
+
+    // Iris sizes coded buffers from the current rate-control controls. A
+    // format set before them keeps the buffered-RC size, and queueing then
+    // fails EINVAL; re-derive it now that the controls are final and before
+    // any buffer exists.
+    const FormatInfo coded = device_->set_format(
+        Queue::Capture, FormatInfo { config_.codec, config_.width, config_.height, 1, 0, 0 });
+    require(coded.pixelformat == config_.codec, "encoder lost the codec after configuration",
+        VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
 
     require(device_->request_buffers(Queue::Output, kOutputSlots, V4L2_MEMORY_DMABUF) >= kOutputSlots,
         "encoder input buffers", VA_STATUS_ERROR_OPERATION_FAILED);
@@ -178,10 +212,23 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
         params.frame_rate_num, params.frame_rate_den);
 }
 
+void EncoderSession::set_frame_qp(int qp)
+{
+    const bool h264 = config_.codec == V4L2_PIX_FMT_H264;
+    set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP : V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP, qp,
+        "i-frame qp");
+    set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP : V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP, qp,
+        "p-frame qp");
+}
+
 void EncoderSession::apply_dynamic(const EncodeParams& params)
 {
     // Only the controls the kernel marks CAP_FLAG_DYNAMIC_ALLOWED may be
     // written while the raw queue streams; the rest were set in configure().
+    if (params.rate_mode == RateMode::Cqp && params.qp != applied_.qp) {
+        set_frame_qp(params.qp);
+        applied_.qp = params.qp;
+    }
     if (params.bitrate && params.bitrate != applied_.bitrate) {
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
         applied_.bitrate = params.bitrate;
@@ -194,7 +241,7 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
         }
     }
     if (params.gop_size != applied_.gop_size) {
-        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, static_cast<int32_t>(params.gop_size), "gop size");
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
         applied_.gop_size = params.gop_size;
     }
 }

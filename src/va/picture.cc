@@ -105,8 +105,10 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         c->height = static_cast<unsigned>(height);
 
         if (cfg.entrypoint == VAEntrypointEncSlice) {
-            c->encoder = make_encoder(
-                cfg.profile, (cfg.rate_control & VA_RC_CBR) ? iris::RateMode::Cbr : iris::RateMode::Vbr);
+            const iris::RateMode rate_mode = (cfg.rate_control & VA_RC_CQP)  ? iris::RateMode::Cqp
+                : (cfg.rate_control & VA_RC_CBR)                             ? iris::RateMode::Cbr
+                                                                             : iris::RateMode::Vbr;
+            c->encoder = make_encoder(cfg.profile, rate_mode);
             iris::EncodeConfig ec;
             ec.codec = c->encoder->v4l2_pixelformat();
             ec.width = c->width;
@@ -275,6 +277,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 // a client may render them with the IDR only.
                 c->enc_picture.picture = nullptr;
                 c->enc_picture.misc.clear();
+                c->enc_picture.slices.clear();
                 c->enc_picture.surface_width = s->width;
                 c->enc_picture.surface_height = s->height;
             } else {
@@ -324,7 +327,10 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                     break;
                 case VAEncSliceParameterBufferType:
                     // The firmware decides the slice layout; the client's
-                    // slice parameters only describe what it expects.
+                    // slice parameters only describe what it expects. CQP
+                    // reads the first slice's QP delta.
+                    for (unsigned k = 0; k < b->count; ++k)
+                        c->enc_picture.slices.push_back(b->data.data() + static_cast<size_t>(k) * b->size);
                     break;
                 case VAEncPackedHeaderParameterBufferType:
                 case VAEncPackedHeaderDataBufferType:

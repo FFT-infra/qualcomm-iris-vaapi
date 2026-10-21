@@ -28,6 +28,9 @@ struct EncodePicture {
     const void* sequence = nullptr; // VAEncSequenceParameterBuffer<Codec>
     const void* picture = nullptr; // VAEncPictureParameterBuffer<Codec>
     std::vector<const void*> misc; // VAEncMiscParameterBuffer<...>
+    // VAEncSliceParameterBuffer<Codec>. The firmware owns the slice layout,
+    // but CQP takes the picture QP from the first slice's delta.
+    std::vector<const void*> slices;
     unsigned surface_width = 0, surface_height = 0;
 };
 
