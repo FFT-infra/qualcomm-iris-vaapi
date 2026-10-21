@@ -16,6 +16,7 @@ schema=$(get schema)
 # The manifest records target paths without DESTDIR so a packaged build does
 # not carry its build root; a staged uninstall re-applies its own.
 driver=$destdir$(get driver_path)
+alias_path=$destdir$(get driver_alias_path)
 launcher=$destdir$(get launcher_path)
 desktop_dir=$destdir$(get desktop_dir)
 expected=$(get artifact_sha256)
@@ -28,6 +29,10 @@ case "$driver" in
     *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe driver path: $driver" ;;
 esac
 case "$driver" in /*/v4l2_drv_video.so) ;; *) fail "unexpected driver path: $driver" ;; esac
+case "$alias_path" in
+    ''|/*/msm_drv_video.so) ;;
+    *) fail "unexpected driver alias path: $alias_path" ;;
+esac
 case "$launcher" in
     *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe launcher path: $launcher" ;;
 esac
@@ -57,6 +62,11 @@ fi
 
 actual=$(sha256sum "$driver" | awk '{print $1}')
 [ "$actual" = "$expected" ] || fail "refusing to remove modified driver (expected $expected, got $actual)"
+# The alias is ours only while it points at our driver.
+if [ -n "$alias_path" ] && [ -L "$alias_path" ] \
+    && [ "$(readlink "$alias_path")" = v4l2_drv_video.so ]; then
+    rm -f "$alias_path"
+fi
 rm -f "$driver" "$launcher"
 for desktop in "$desktop_dir"/*.desktop; do
     [ -f "$desktop" ] || continue

@@ -48,12 +48,19 @@ grep -Fq 'destdir$prefix/bin/iris-vaapi-browser' "$installer" \
 # shellcheck disable=SC2016
 grep -Fq 'destdir$prefix/share/applications' "$installer" \
     || fail 'install-system.sh no longer installs desktop entries where this check expects'
+# libva resolves the driver by DRM name when the variable is unset, so the
+# alias is a shipped file, not a convenience: both the installer and the spec
+# must carry it or clients such as mpv silently fall back to software.
+# shellcheck disable=SC2016
+grep -Fq 'msm_drv_video.so' "$installer" \
+    || fail 'install-system.sh no longer installs the msm alias libva resolves by DRM name'
 
 expect_in_spec() {
     grep -Fq "$1" "$spec" || fail "spec %files does not list $1"
 }
 
 expect_in_spec '%{_libdir}/dri/v4l2_drv_video.so'
+expect_in_spec '%{_libdir}/dri/msm_drv_video.so'
 expect_in_spec '%{_bindir}/iris-vaapi-browser'
 expect_in_spec '%{_datadir}/iris-vaapi/install-manifest.txt'
 

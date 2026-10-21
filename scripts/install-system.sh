@@ -115,6 +115,15 @@ if [ -z "$destdir" ] && [ -f "$destdir$driver_dir/v4l2_drv_video.so" ]; then
 fi
 
 install -D -m 0755 "$artifact" "$destdir$driver_dir/v4l2_drv_video.so"
+# libva resolves the driver by DRM driver name when LIBVA_DRIVER_NAME is unset,
+# and this SoC reports DRIVER=msm_dpu, so it looks for msm_drv_video.so. The
+# launcher sets the name explicitly; this alias is what lets mpv, VLC,
+# GStreamer and anything else work without an environment variable.
+alias_path=$destdir$driver_dir/msm_drv_video.so
+if [ -e "$alias_path" ] && [ ! -L "$alias_path" ]; then
+    fail "$alias_path exists and is not a symlink; refusing to replace it"
+fi
+ln -sfn v4l2_drv_video.so "$alias_path"
 install -D -m 0755 "$root/scripts/iris-vaapi-browser" \
     "$destdir$prefix/bin/iris-vaapi-browser"
 for desktop in "$root"/data/*.desktop; do
@@ -135,6 +144,7 @@ manifest_new=$manifest.new.$$
     # uninstall-system.sh at a path that does not exist on the installed
     # system. Consumers prepend their own DESTDIR.
     printf 'driver_path=%s\nlauncher_path=%s\ndesktop_dir=%s\n' "$driver_dir/v4l2_drv_video.so" "$prefix/bin/iris-vaapi-browser" "$prefix/share/applications"
+    printf 'driver_alias_path=%s\n' "$driver_dir/msm_drv_video.so"
     printf 'previous_driver_backup=%s\nprevious_driver_sha256=%s\n' "${backup#"$destdir"}" "$previous_sha256"
 } >"$manifest_new"
 mv -f "$manifest_new" "$manifest"
@@ -144,6 +154,7 @@ if [ -z "$destdir" ] && command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 printf 'PASS installed VA driver: %s\n' "$destdir$driver_dir/v4l2_drv_video.so"
+printf 'PASS installed driver alias: %s\n' "$alias_path"
 printf 'PASS installed browser launcher: %s\n' "$destdir$prefix/bin/iris-vaapi-browser"
 printf 'PASS installed desktop entries: %s\n' "$destdir$prefix/share/applications"
 printf 'PASS install manifest: %s\n' "$manifest"

@@ -76,9 +76,11 @@ sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
 Arch 用 `packaging/arch/PKGBUILD`。两种包都会把驱动装进 libva 的驱动目录，
-同时装上 `iris-vaapi-browser` 启动器、一个 "Google Chrome (Iris VA-API)"
-桌面项，以及记录源码提交和产物哈希的安装清单。之后从那个桌面项启动
-Chrome，或者在终端里：
+旁边再放一个 `msm_drv_video.so` 符号链接，同时装上 `iris-vaapi-browser`
+启动器、一个 "Google Chrome (Iris VA-API)" 桌面项，以及记录源码提交和产物
+哈希的安装清单。这个链接是给 libva 自己找驱动用的：这颗 SoC 报的是
+`DRIVER=msm_dpu`，没有它，不设 `LIBVA_DRIVER_NAME` 的客户端（mpv、VLC、
+GStreamer）根本打不开驱动。之后从那个桌面项启动 Chrome，或者在终端里：
 
 ```sh
 iris-vaapi-browser --browser=chrome

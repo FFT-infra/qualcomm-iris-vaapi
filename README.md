@@ -84,10 +84,13 @@ sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
 Arch uses `packaging/arch/PKGBUILD`. Both install the driver into libva's
-driver directory, the `iris-vaapi-browser` launcher and a
-"Google Chrome (Iris VA-API)" desktop entry, plus an install manifest with
-the source commit and artifact hash. Then launch Chrome from that desktop
-entry, or from a shell:
+driver directory, an `msm_drv_video.so` symlink beside it, the
+`iris-vaapi-browser` launcher and a "Google Chrome (Iris VA-API)" desktop
+entry, plus an install manifest with the source commit and artifact hash.
+The symlink is what libva resolves on its own: this SoC reports
+`DRIVER=msm_dpu`, and without the alias a client that does not set
+`LIBVA_DRIVER_NAME` (`mpv`, VLC, GStreamer) opens no driver at all. Then
+launch Chrome from that desktop entry, or from a shell:
 
 ```sh
 iris-vaapi-browser --browser=chrome

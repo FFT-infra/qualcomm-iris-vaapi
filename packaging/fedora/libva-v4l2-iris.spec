@@ -115,6 +115,10 @@ sh scripts/refresh-install-manifest.sh \
 %license COPYING COPYING.LGPL COPYING.MIT
 %doc README.md README.zh-CN.md AUTHORS CREDITS
 %{_libdir}/dri/v4l2_drv_video.so
+# libva falls back to the DRM driver name when LIBVA_DRIVER_NAME is unset, and
+# this SoC reports DRIVER=msm_dpu. The alias keeps clients that do not set the
+# variable (mpv, VLC, GStreamer) on this driver instead of software.
+%{_libdir}/dri/msm_drv_video.so
 %{_bindir}/iris-vaapi-browser
 %{_datadir}/applications/google-chrome-iris-v4l2.desktop
 %dir %{_datadir}/iris-vaapi
