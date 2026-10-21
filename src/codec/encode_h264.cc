@@ -86,7 +86,7 @@ public:
     std::vector<uint8_t> prepend_parameter_sets(const std::vector<uint8_t>& access_unit,
         std::vector<NalUnit>& last) override
     {
-        return codec::prepend_parameter_sets(access_unit, last);
+        return codec::prepend_parameter_sets(access_unit, last, Codec::H264);
     }
 
     uint32_t v4l2_pixelformat() const override { return V4L2_PIX_FMT_H264; }
