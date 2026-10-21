@@ -1989,3 +1989,21 @@ The nine one-second HEVC segments from the last row all start on a
 keyframe. Requesting every picture is not the failure mode the "never
 skip the lever" rule was worried about: it is the intended cost of a
 request per picture, and it produces an all-intra stream.
+
+## Regression sweep over the encode changes (2026-10-22)
+
+Source `227dfea`, driver SHA-256
+`d11df8030e61a231a21e0355476d5da3b96a448cdcd48e1d2c4309f6789aa4f6`
+(`source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, build tree only.
+
+- `test/iris-matrix.sh`, 48 frames: H.264, HEVC and VP9 all `PASS` with
+  exact per-frame MD5 against the native V4L2 decoders, `submitted=48
+  capture=48 drops=0 timeouts=0 drain=1`. AV1 skips for the documented
+  OBU contract; MPEG-2/VP8 are not on this node.
+- `test/iris-browser-acceptance.sh --driver build/src/v4l2_drv_video.so`,
+  20 s of `sintel-1080p30-h264-b3.mp4`: `decoder=VaapiVideoDecoder
+  platform=True frames=480 dropped=0`, driver
+  `build-tree:d11df8030e61`, boot unchanged. A run without `--driver` also
+  passes, on the installed package `df16127ccecf`; that one is the
+  package's own record, not this tree's.
