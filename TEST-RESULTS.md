@@ -1645,9 +1645,12 @@ raw framemd5 compares frame layouts as much as pixels.
 size, `video_bitrate_mode` (VBR/CBR), the frame-level RC switch, the
 sequence-header mode, the LTR controls and the H.264/HEVC profile, level and
 QP controls. It lists no `force_key_frame`, no RAP control and no
-`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. On-demand IDR therefore stays
-unimplemented: the driver has nothing to write, and `intra_refresh_period`
-is a different feature (periodic intra refresh, not an IDR request).
+`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. The conclusion recorded here — that
+on-demand IDR therefore stays unimplemented — was wrong about what the
+absence rules out: the intra period is a GOP control the node does have,
+and the session uses it for one picture. See "On-demand IDR by moving the
+intra period" below. `intra_refresh_period` is still a different feature
+(periodic intra refresh, not an IDR request) and is not used.
 
 ## Client requests the encoder cannot honour (2026-10-22)
 
