@@ -1970,3 +1970,22 @@ ten HEVC segments that failed to decode, for two separate reasons:
 
 `meson test` is 18/18 (`annexb` added to the CI inventory) and
 `sh test/run-static-checks.sh` passes.
+
+## Requested-IDR edge cases (2026-10-22)
+
+Source `7205500`, same driver SHA-256 as the segment record
+(`d11df803…`, `source_dirty=false`), same boot and kernel, 1280x720 at
+24 fps.
+
+| Request | Codec | IDR positions | Frames | Decode |
+| --- | --- | --- | --- | --- |
+| `eq(n,0)` | H.264 | 0 | 40 | ok |
+| `expr:1` (every picture) | H.264 | 0 … 59, all of them | 60 | ok |
+| `eq(n,59)` (the last picture) | H.264 | 0, 59 | 60 | ok |
+| `eq(n,24)` | HEVC | 0, 24 | 70 | ok |
+| `gte(t,n_forced*1)` | HEVC | 0, 24, 48, … 192 | 200 | ok |
+
+The nine one-second HEVC segments from the last row all start on a
+keyframe. Requesting every picture is not the failure mode the "never
+skip the lever" rule was worried about: it is the intended cost of a
+request per picture, and it produces an all-intra stream.

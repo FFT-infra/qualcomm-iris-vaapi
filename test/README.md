@@ -16,6 +16,11 @@ On the tablet, run the following verification gates:
 - `test/iris-concurrency-soak.sh`: multi-context thermal/stability soaking.
 - `test/av1-obu-roundtrip.sh`: software oracle for AV1 OBU repacking.
 
+`annexb-test` covers the NAL splitting a requested IDR needs (both NAL
+layouts, the parameter sets a cut stream must carry);
+`encode-session-test` covers the session rules, including the on-demand
+IDR lever and the strictly rising timestamps.
+
 Two probes build with the tree and run on the target only:
 
 - `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
