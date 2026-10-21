@@ -144,6 +144,15 @@ publishing. The contract, the state machine and the trace vocabulary are in
 [`docs/architecture.md`](docs/architecture.md); the measurements are in
 [TEST-RESULTS.md](TEST-RESULTS.md).
 
+A client can also hand over the memory itself: `vaCreateSurfaces2` with
+`VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` (or the older `_DRM_PRIME`) creates
+a surface over one linear NV12/P010 DMA-BUF instead of allocating one. The
+buffer must already carry the CAPTURE layout the firmware writes — 128-byte
+pitch (256 for P010), chroma after the 32-aligned luma rows — and the fd is
+duplicated, so the client may close its own. The surface then takes whichever
+policy above applies (Import on a decode-order kernel, Copy otherwise) and
+is usable as an encode input as well.
+
 ## Known limits
 
 - **VP9 stays on the GPU copy path.** A VP9 alt-ref access unit decodes as
@@ -163,6 +172,12 @@ publishing. The contract, the state machine and the trace vocabulary are in
 - **Stock kernel means Copy for Chrome.** Without the decode-order control
   the session runs in display-order mode: bounded sync waits plus one
   STOP/LAST/START drain on timeout, and Import is refused.
+- **Imported surfaces must match the CAPTURE layout.** A client DMA-BUF with
+  a tiled modifier, more than one object, a pitch of the client's choosing or
+  a chroma plane at a different offset is refused at `vaCreateSurfaces2` with
+  `VA_STATUS_ERROR_INVALID_PARAMETER` rather than decoded into the wrong
+  pixels. PRIME_1 has no modifier field; there the driver trusts
+  `VA_SURFACE_EXTBUF_DESC_ENABLE_TILING` to say the buffer is linear.
 - **Chrome 153 HEVC seek regression, upstream.** Chromium 153 turned on
   `ExtendedVideoBitstreamValidation`, and its shared `H265Decoder` treats
   the first SPS after every seek as a configuration change, so the

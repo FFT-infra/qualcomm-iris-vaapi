@@ -163,6 +163,16 @@ writes and also satisfies freedreno's linear import rules. One object, two
 layers, linear modifier; the fd, pitch and offsets never change for the
 surface's lifetime.
 
+A surface created over client memory (`vaCreateSurfaces2` with
+`VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` or the older `_DRM_PRIME`) does not
+allocate. `src/util/prime.cc` checks the descriptor against this layout and
+the resulting `StableBuffer` is a duplicate of the client's fd, marked
+`persistent_export`, so Import and Copy act on it unchanged and it works as
+an encode input too. A buffer in any other geometry, modifier or object count
+is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation: the firmware would write
+its own layout into it and neither side would notice until the picture was
+wrong.
+
 ### 3.5 What is gone
 
 Pre-binding surface *i* to CAPTURE ordinal *i*; the DMA-BUF import path
@@ -177,7 +187,9 @@ track on 2026-09-22 and became the Import publish policy above. The §9
 acceptance program found that the firmware does *not* fill CAPTURE buffers
 in QBUF order (`test/iris-import-probe.cc`, results in TEST-RESULTS.md);
 the policy exists because the session queues exactly one client buffer at a
-time and never skips a submitted picture.
+time and never skips a submitted picture. Creating a surface over client
+memory is not the path that went: it allocates nothing (§3.4) and enters the
+same policy from the API.
 
 ## 4. Session state machine
 
@@ -313,7 +325,8 @@ src/
                       Import queue (queue_capture_import, one window slot)
     publish.{h,cc}    CopyEngine interface + CPU engine
     gpu_copy.{h,cc}   EGL/GLES blit on one worker thread, view cache by Frame id
-    alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap)
+    alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
+                      duplicate of a client's DMA-BUF for an imported surface
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
     h264.cc           SPS/PPS synthesis, AU assembly
@@ -325,6 +338,8 @@ src/
     encode_hevc.cc    the same for HEVC, Main only
   util/
     options.{h,cc}    every environment variable, read once at init
+    prime.{h,cc}      the CAPTURE layout in one place, and the client DMA-BUF
+                      import rules (DRM_PRIME_2 descriptor, PRIME_1 table)
     encode-params.h   EncodeParams/RateMode: the contract iris/ and codec/ share
                       without including each other
     trace.h           stable trace vocabulary (§8); every record ends ` t=<ms>`
@@ -335,7 +350,9 @@ test/
                       encode parameter translation
   iris-*.sh           tablet gates: matrix (framemd5), structure matrix, DRC, soak,
                       browser acceptance, concurrency soak; test/iris-import-probe.cc
-                      is the client-owned-buffer acceptance program (§9)
+                      is the client-owned-buffer acceptance program (§9), and
+                      iris-va-import-probe.cc the same memory entered through
+                      vaCreateSurfaces2
   remote/             deploy, provenance, cdp
 ```
 
@@ -416,6 +433,7 @@ import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1
 import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n> chroma=<n> size=<n>)
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
+va create_surfaces count=<n> <w>x<h> fourcc=<fourcc> imported=0|1 fd=<n>
 va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
 va create_context id=<n> profile=<id> <w>x<h> entrypoint=encslice codec=<fourcc>
 va destroy_context id=<n> pending=<n>
@@ -460,6 +478,12 @@ from (246/360 wrong under the doc's original model), and the Import policy
 is the deformation that survives that finding (one buffer in flight, no
 holes). Results and the VP9 open failure: TEST-RESULTS.md.
 
+Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
+§3.4) is the same policy reached from the API. Its gates are `prime-import`
+(host: the layout and refusal rules) and `test/iris-va-import-probe.cc`
+(target: the surface aliases the client's bytes and a firmware encode reads
+them).
+
 ## 10. Invariants (the ones tests exist for)
 
 1. A CAPTURE completion is published to at most one surface, found only by
@@ -502,6 +526,11 @@ holes). Results and the VP9 open failure: TEST-RESULTS.md.
     reference indexes — the firmware writes the sequence headers, owns the
     reference structure and chooses the quantisation, so none of them can be
     forwarded. Deblocking additionally cannot change inside a live context.
+14. A surface created over client memory is a view of exactly one linear
+    DMA-BUF in the CAPTURE layout; the driver owns a duplicate of the fd and
+    the client may close its own. Any other geometry, modifier or object
+    count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
+    decoded into the wrong pixels.
 
 ## 11. How work is divided
 

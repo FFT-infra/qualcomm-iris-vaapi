@@ -127,6 +127,13 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
 [`docs/architecture.md`](docs/architecture.md)，测量数据在
 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
+客户端也可以直接把自己的内存交进来：`vaCreateSurfaces2` 带上
+`VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2`（或更老的 `_DRM_PRIME`），surface
+就建在一块线性的 NV12/P010 DMA-BUF 上，驱动不再分配。缓冲区必须已经是固件
+写入的 CAPTURE 布局——128 字节 pitch（P010 是 256），chroma 紧跟在按 32 对齐
+的亮度行之后。驱动把 fd dup 一份，客户端随时可以关掉自己的。建出来的 surface
+走上面那套策略（解码顺序内核上 Import，否则 Copy），也可以直接当编码输入。
+
 ## 已知限制
 
 - **VP9 还在 GPU 拷贝路径上。** 一个 VP9 alt-ref 访问单元会解出两张图。只挂
@@ -141,6 +148,11 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `V4L2_VA_EXPERIMENTAL_PROFILES=1` 只在验证时声明该 profile。
 - **原版内核上 Chrome 走 Copy。** 没有解码顺序控制项时会话运行在显示顺序
   模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空，Import 被拒绝。
+- **导入的 surface 必须符合 CAPTURE 布局。** 客户端 DMA-BUF 只要带 tiling
+  modifier、多于一个 object、用自己的 pitch，或者 chroma 不在规定偏移上，
+  `vaCreateSurfaces2` 一律返回 `VA_STATUS_ERROR_INVALID_PARAMETER`，而不是
+  解进错误的像素。PRIME_1 没有 modifier 字段，那里只能信
+  `VA_SURFACE_EXTBUF_DESC_ENABLE_TILING` 说的"线性"。
 - **Chrome 153 的 HEVC seek 回归，上游问题。** Chromium 153 默认打开了
   `ExtendedVideoBitstreamValidation`，共用的 `H265Decoder` 把每次 seek 后的
   第一个 SPS 当成配置变更，合成器会一直显示 seek 之前的画面。

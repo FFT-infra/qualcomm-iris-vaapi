@@ -39,6 +39,7 @@ jobs:
             hevc-parameter-sets \
             encode-params \
             encode-session \
+            prime-import \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \

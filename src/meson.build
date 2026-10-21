@@ -16,6 +16,8 @@ core_deps = [libva_dep, libdrm_dep, kernel_dep]
 
 core_sources = [
 	'util/options.cc',
+	'util/prime.cc',
+	'util/prime.cc',
 	'iris/device.cc',
 	'iris/slots.cc',
 	'iris/alloc.cc',

@@ -16,6 +16,21 @@ On the tablet, run the following verification gates:
 - `test/iris-concurrency-soak.sh`: multi-context thermal/stability soaking.
 - `test/av1-obu-roundtrip.sh`: software oracle for AV1 OBU repacking.
 
+Two probes build with the tree and run on the target only:
+
+- `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
+  acceptance program — proves the firmware writes picture k into the k-th
+  queued client DMA-BUF (docs/architecture.md §9).
+- `test/iris-va-import-probe.cc <render-node>`: the same client memory
+  entered through the public API. It needs `LIBVA_DRIVER_NAME=v4l2` and
+  `LIBVA_DRIVERS_PATH` pointing at the build tree; it checks DRM_PRIME_2 and
+  PRIME_1 import, that the surface aliases the client's bytes, that an
+  encode from it matches the same picture from a driver-allocated surface,
+  and that a wrong pitch is refused.
+- `test/iris-encode-control-probe.cc <encoder-node>`: which loop-filter
+  controls the node exposes, and that a deblocking request it cannot honour
+  is refused rather than ignored.
+
 ## Qualcomm Iris codec matrix
 
 The repeatable matrix (media generation, VA-API decode through FFmpeg, EOS

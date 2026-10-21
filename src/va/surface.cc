@@ -7,6 +7,7 @@
 #include "driver.h"
 
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <algorithm>
 #include <cstring>
@@ -68,6 +69,36 @@ std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
     return owner ? owner->session : nullptr;
 }
 
+// The buffer's real length. DMA-BUF llseek reports it on the Iris kernel, so
+// a descriptor cannot claim more memory than the object holds; 0 means the
+// kernel did not say and the import cannot cross-check.
+uint64_t allocation_size(int fd)
+{
+    const off_t length = lseek(fd, 0, SEEK_END);
+    return length > 0 ? static_cast<uint64_t>(length) : 0;
+}
+
+// The surface becomes a view over the client's memory: a StableBuffer whose
+// fd never changes, marked persistent so the existing Import/Copy policy
+// applies unchanged (architecture §3.3). The fd is duplicated here, so the
+// client may close its own at any time.
+std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, const iris::PlaneLayout& planes,
+    uint32_t fourcc, unsigned width, unsigned height)
+{
+    const int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    iris::require(copy >= 0, "duplicate the imported DMA-BUF", VA_STATUS_ERROR_ALLOCATION_FAILED);
+    iris::Layout layout;
+    layout.fourcc = fourcc;
+    layout.width = width;
+    layout.height = height;
+    layout.stride = planes.stride;
+    layout.storage_height = planes.storage_height;
+    layout.data_offset = 0;
+    layout.size = planes.size;
+    const unsigned size = allocation >= planes.size ? static_cast<unsigned>(allocation) : planes.size;
+    return std::make_unique<iris::StableBuffer>(copy, size, iris::MemoryOrigin::Imported, layout);
+}
+
 } // namespace
 
 VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, unsigned height, VASurfaceID* ids,
@@ -80,7 +111,7 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         const uint32_t fourcc = fourcc_for(format);
         unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
-        const VASurfaceAttribExternalBuffers* external = nullptr;
+        const void* external = nullptr;
         for (unsigned i = 0; i < attribute_count; ++i) {
             const auto& attribute = attributes[i];
             if (!(attribute.flags & VA_SURFACE_ATTRIB_SETTABLE))
@@ -95,7 +126,9 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                 memory_type = static_cast<unsigned>(attribute.value.value.i);
                 break;
             case VASurfaceAttribExternalBufferDescriptor:
-                external = static_cast<const VASurfaceAttribExternalBuffers*>(attribute.value.value.p);
+                iris::require(attribute.value.type == VAGenericValueTypePointer && attribute.value.value.p,
+                    "null external buffer descriptor", VA_STATUS_ERROR_INVALID_PARAMETER);
+                external = attribute.value.value.p;
                 break;
             case VASurfaceAttribUsageHint:
                 break;
@@ -103,11 +136,38 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                 throw iris::Error(VA_STATUS_ERROR_ATTR_NOT_SUPPORTED, "unsupported surface attribute");
             }
         }
-        // Client-provided memory (DRM_PRIME_2 import) is the research track
-        // of architecture §3.5; refuse it explicitly so the client falls back
-        // to driver-allocated surfaces instead of decoding into nothing.
-        iris::require(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_VA && external == nullptr,
-            "external surface memory is not supported", VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+        // Client memory (architecture §3.3): the surface is created as a view
+        // over one linear DMA-BUF in the CAPTURE layout, and every later
+        // decode goes through the Import policy — driver-allocated surfaces
+        // are the other case.
+        std::unique_ptr<iris::StableBuffer> imported;
+        int import_fd = -1;
+        if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
+            iris::require(external != nullptr, "DRM_PRIME_2 import needs a surface descriptor",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(count == 1, "DRM_PRIME_2 import creates one surface per descriptor",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const auto& descriptor = *static_cast<const VADRMPRIMESurfaceDescriptor*>(external);
+            const int fd = descriptor.objects[0].fd;
+            const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
+            imported = import_stable(fd, allocation,
+                iris::validate_prime2(descriptor, width, height, fourcc, allocation), fourcc, width, height);
+        } else if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+            iris::require(external != nullptr, "DRM_PRIME import needs a buffer table",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(count == 1, "DRM_PRIME import creates one surface per buffer",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const auto& buffers = *static_cast<const VASurfaceAttribExternalBuffers*>(external);
+            const int fd = buffers.num_buffers == 1 && buffers.buffers ? static_cast<int>(buffers.buffers[0]) : -1;
+            const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
+            imported = import_stable(fd, allocation,
+                iris::validate_prime1(buffers, width, height, fourcc, allocation), fourcc, width, height);
+        } else {
+            iris::require(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_VA && external == nullptr,
+                "unsupported surface memory type", VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+        }
+        if (imported)
+            import_fd = imported->fd();
 
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         for (unsigned i = 0; i < count; ++i) {
@@ -115,11 +175,15 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             s->width = width;
             s->height = height;
             s->fourcc = fourcc;
+            if (imported) {
+                s->stable = std::move(imported);
+                s->persistent_export = true;
+            }
             ids[i] = d.next_id++;
             d.surfaces[ids[i]] = s;
         }
-        d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s", count, width, height,
-            reinterpret_cast<const char*>(&fourcc));
+        d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s imported=%d fd=%d", count, width, height,
+            reinterpret_cast<const char*>(&fourcc), import_fd >= 0 ? 1 : 0, import_fd);
         return VA_STATUS_SUCCESS;
     });
 }
@@ -228,7 +292,9 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMinHeight, static_cast<int>(d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxHeight, static_cast<int>(d.capabilities.max_height), VA_SURFACE_ATTRIB_GETTABLE);
-    add(VASurfaceAttribMemoryType, VA_SURFACE_ATTRIB_MEM_TYPE_VA, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    add(VASurfaceAttribMemoryType,
+        VA_SURFACE_ATTRIB_MEM_TYPE_VA | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     if (attributes)
         std::copy_n(list, std::min(n, *count), attributes);
     *count = n;

@@ -16,6 +16,19 @@ executable(
   'iris-import-probe.cc',
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: a VA client that
+# hands the driver its own DMA-BUF. Proves the public API path (import in the
+# CAPTURE layout, aliasing, a firmware encode reading the client's pixels),
+# which no unit test can. Needs libva's DRM display.
+va_drm_dep = dependency('libva-drm', required: false)
+if va_drm_dep.found()
+  executable(
+    'iris-va-import-probe',
+    'iris-va-import-probe.cc',
+    dependencies: [iris_core_dep, va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: it needs the
 # encoder node. Answers whether the loop-filter controls exist and whether a
 # deblocking request the firmware cannot honour is refused, which is the §10
@@ -25,6 +38,15 @@ executable(
   'iris-encode-control-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
+# Client memory (DRM_PRIME_2 / PRIME_1) accepted only in the CAPTURE layout,
+# and the one definition of that layout. No hardware.
+prime_import_test = executable(
+  'prime-import-test',
+  'prime-import-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('prime-import', prime_import_test)
 
 # Parameter-set bitstream round trips for the HEVC translator.
 hevc_parameter_sets_test = executable(
