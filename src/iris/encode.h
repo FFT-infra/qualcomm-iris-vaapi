@@ -10,6 +10,7 @@
 #include "alloc.h"
 #include "device.h"
 
+#include "../codec/annexb.h"
 #include "../util/encode-params.h"
 #include "../util/options.h"
 #include "../util/trace.h"
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,10 +48,14 @@ public:
 
     bool configured() const { return configured_; }
     const EncodeConfig& config() const { return config_; }
+    // Codec hook for a requested IDR: the firmware prefixes SPS/PPS to its
+    // own IDRs only, so a levered one would not be decodable from a cut.
+    using PrepareAccessUnit
+        = std::function<std::vector<uint8_t>(const std::vector<uint8_t>&, std::vector<codec::NalUnit>&)>;
     // First picture only: formats, crop, controls, buffer pools, STREAMON.
     // `width`/`height` are the input surface's, which may be smaller than
     // the context the client declared.
-    void configure(const EncodeParams& params, unsigned width, unsigned height);
+    void configure(const EncodeParams& params, unsigned width, unsigned height, PrepareAccessUnit prepare = {});
     // Queue `dmabuf_fd` as one raw frame, wait for its access unit, and
     // return the completion. Safe to call from one thread; the session
     // mutex serialises a stray second caller. The V4L2 timestamp advances by
@@ -96,6 +102,10 @@ private:
     unsigned rate_num_ = 30;
     unsigned rate_den_ = 1;
     uint64_t timestamp_us_ = 0;
+    // Parameter sets carried by the last access unit, for a requested IDR the
+    // firmware wrote without them.
+    std::vector<codec::NalUnit> parameter_sets_;
+    PrepareAccessUnit prepare_;
     // One transaction at a time; also keeps finish() from tearing the queues
     // down under an encode that is still waiting for a completion.
     std::mutex mutex_;

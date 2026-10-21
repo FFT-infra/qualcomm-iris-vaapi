@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "annexb.h"
+
 #include "../util/encode-params.h"
 
 #include <cstdint>
@@ -56,6 +58,16 @@ public:
     virtual VABufferID coded_buf(const EncodePicture& picture) const = 0;
     // Throws iris::Error for a picture the firmware cannot encode.
     virtual EncodeParams translate(const EncodePicture& picture) = 0;
+    // SPS/PPS/SEI to put in front of `access_unit` when the client asked for
+    // an IDR and the firmware wrote a bare one. The default keeps every
+    // context free of codec state and returns the unit unchanged; the
+    // codecs that need it override this.
+    virtual std::vector<uint8_t> prepend_parameter_sets(const std::vector<uint8_t>& access_unit,
+        std::vector<NalUnit>& last)
+    {
+        (void)last;
+        return access_unit;
+    }
 };
 
 std::unique_ptr<Encoder> make_h264_encoder(VAProfile profile, RateMode rate_mode);

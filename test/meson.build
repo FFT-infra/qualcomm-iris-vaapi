@@ -7,6 +7,14 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
+# Annex-B reassembly for a requested IDR (src/codec/annexb.cc).
+annexb_test = executable(
+  'annexb-test',
+  'annexb-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('annexb', annexb_test)
+
 # Hardware probe, built but not registered as a meson test: it needs a
 # decode-order Iris node and arguments. Proves by content that picture k
 # lands in the k-th queued client DMA-BUF; the acceptance test

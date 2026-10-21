@@ -92,7 +92,8 @@ void EncoderSession::set_control(uint32_t id, int32_t value, const char* name)
     }
 }
 
-void EncoderSession::configure(const EncodeParams& params, unsigned width, unsigned height)
+void EncoderSession::configure(
+    const EncodeParams& params, unsigned width, unsigned height, PrepareAccessUnit prepare)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     require(!configured_, "encoder configured twice", VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -177,6 +178,7 @@ void EncoderSession::configure(const EncodeParams& params, unsigned width, unsig
     // carries the operating rate, which only affects clocking. One rate is
     // fixed for the session because S_PARM cannot change while streaming;
     // the per-picture timestamps advance on the same value.
+    prepare_ = std::move(prepare);
     rate_num_ = params.frame_rate_num ? params.frame_rate_num : 30;
     rate_den_ = params.frame_rate_den ? params.frame_rate_den : 1;
     device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
@@ -394,6 +396,11 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
 
     EncodeResult result;
     result.bytes.assign(slot.mapping + completion->data_offset, slot.mapping + completion->bytesused);
+    // A requested IDR came from the intra period, not from the firmware's
+    // own sync frame, so it may carry no SPS/PPS: a stream cut there would
+    // fail to decode. Prefix the ones the last access unit carried.
+    if (force_idr && prepare_)
+        result.bytes = prepare_(result.bytes, parameter_sets_);
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
     // evidence (an IDR NAL at every GOP boundary).

@@ -30,6 +30,7 @@ core_sources = [
 	'codec/vp9.cc',
 	'codec/av1.cc',
 	'codec/av1_obu.cc',
+	'codec/annexb.cc',
 	'codec/encode_h264.cc',
 	'codec/encode_hevc.cc',
 ]

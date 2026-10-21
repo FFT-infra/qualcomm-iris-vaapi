@@ -406,7 +406,13 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
             // firmware returns the access unit.
             const iris::EncodeParams params = c->encoder->translate(c->enc_picture);
             if (!c->encode_session->configured()) {
-                c->encode_session->configure(params, s->width, s->height);
+                // The codec knows which units travel with its keyframes; the
+                // session decides when one needs them.
+                iris::codec::Encoder* encoder = c->encoder.get();
+                c->encode_session->configure(params, s->width, s->height,
+                    [encoder](const std::vector<uint8_t>& unit, std::vector<iris::codec::NalUnit>& last) {
+                        return encoder->prepend_parameter_sets(unit, last);
+                    });
             } else {
                 // The encoder has no SOURCE_CHANGE: one geometry per context.
                 iris::require(c->encode_session->config().width == s->width

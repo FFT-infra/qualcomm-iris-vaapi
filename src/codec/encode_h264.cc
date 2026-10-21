@@ -4,6 +4,7 @@
 // controls, so this translation only has to pin profile, level, rate
 // control, GOP and entropy coding; nothing here emits a bitstream.
 
+#include "annexb.h"
 #include "encode.h"
 
 #include "../util/error.h"
@@ -80,6 +81,12 @@ public:
         : profile_(profile)
         , rate_mode_(rate_mode)
     {
+    }
+
+    std::vector<uint8_t> prepend_parameter_sets(const std::vector<uint8_t>& access_unit,
+        std::vector<NalUnit>& last) override
+    {
+        return codec::prepend_parameter_sets(access_unit, last);
     }
 
     uint32_t v4l2_pixelformat() const override { return V4L2_PIX_FMT_H264; }

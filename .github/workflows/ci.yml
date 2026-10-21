@@ -36,6 +36,7 @@ jobs:
           test -s build/meson-tests.txt
           for required in \
             session \
+            annexb \
             hevc-parameter-sets \
             encode-params \
             encode-session \
