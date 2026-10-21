@@ -1298,3 +1298,100 @@ Chrome's own dropped-frame counts in those 30 s windows were 2, 2, 1 and 0.
   0 misplaced, 0 decode errors, `VaapiVideoDecoder`, GPU process holding
   the node, boot unchanged. The Import path is now the shipped default
   where the evidence allows it.
+
+## Encode entrypoint: H.264 and HEVC (2026-10-22)
+
+Implementation commit `f63afe0` on `feat/encode-entrypoints`. Target:
+Fedora 44 ARM64 on SM8550 (`sheng`), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` unchanged through every run.
+Decoder and encoder nodes resolved by the `iris_driver` QUERYCAP name:
+`/dev/video0` (`Iris Decoder`) and `/dev/video1` (`Iris Encoder`). The
+driver under test was `build-encode/src/v4l2_drv_video.so`, SHA-256
+`bb4549260f2c6d7b021889d3222e386cfe19735ea61282d93cf97c9e577daed9`,
+selected with `LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=<build>/src`.
+No installed package was involved in this section.
+
+`vainfo` lists `VAEntrypointEncSlice` next to `VAEntrypointVLD` for H.264
+Constrained Baseline, Main and High and for HEVC Main. VP9 and AV1 get no
+encode entrypoint: the encoder node's CAPTURE queue enumerates H264 and
+HEVC only (`iris_venc.c`, `iris_venc_formats_cap`) and its raw queue NV12
+and QC08C (`iris_venc_formats_out`), so there is no hardware path to
+advertise.
+
+| Run | Frames in/out | Bytes | Iris IRQ delta |
+| --- | ---: | ---: | ---: |
+| `h264_vaapi` 1920x1080, 4 Mbit/s VBR, GOP 60 | 300/300 | 9,918,858 | 7441 → 8049 (+608) |
+| `hevc_vaapi` 1920x1080, 4 Mbit/s VBR, GOP 60 | 300/300 | 9,966,042 | 8050 → 8660 (+610) |
+| `h264_vaapi` 1920x1080, CBR 4 Mbit/s, High, level 4.1 | 300/300 | 4,988,651 | — |
+| `h264_vaapi` 1280x720, 2 Mbit/s VBR, GOP 30 | 120/120 | 2,003,275 | — |
+| `hevc_vaapi` 1280x720, 2 Mbit/s VBR, GOP 30 | 120/120 | 2,005,117 | — |
+| `h264_vaapi` 640x360, 1 Mbit/s VBR, GOP 15 | 30/30 | 118,372 (last run of the loop below) | — |
+
+Every stream decodes with `ffmpeg -v error -i <out> -f null -` and reports
+the requested geometry, profile and level:
+
+- H.264 VBR: High, level 4.0, 1920x1080, 300 frames. Key frames at 0, 61,
+  122, 183, 244 (the firmware counts the GOP from the IDR).
+- H.264 CBR with `-profile:v high -level 4.1`: High, level 4.1,
+  1920x1080, 300 frames. The byte count is 3.99 Mbit/s over the 10 s of
+  content, which is the requested CBR target.
+- HEVC VBR: Main, level 4.0, 1920x1080, 300 frames.
+- 720p: both codecs report 1280x720, 120 frames. The raw port was
+  aligned to 1280x736 and the crop kept the SPS at 720 lines.
+- 640x360: 640x360, 30 frames.
+
+The SPS VUI carries `num_units_in_tick=2097152`, `time_scale=125829120`
+(30 fps), which is what `S_PARM` on the CAPTURE queue produced. Raw
+H.264/HEVC demuxers report 25 fps because they do not read the VUI; the
+remux below shows the intended rate.
+
+Context lifetime: ten consecutive 720p `h264_vaapi` runs (create context,
+ten pictures, destroy) all exited 0 with no driver error in `dmesg`, and
+the last stream decodes clean.
+
+Remux with no extradata: `ffmpeg -framerate 30 -i enc.h264 -c copy
+enc.mp4` and the same for HEVC both produce MP4s whose `ffprobe` shows
+30 fps and non-zero extradata (46 and 127 bytes) built from the Annex-B
+parameter sets, and which decode without error.
+
+Negative results, as designed:
+
+- `-bf 2` is silently clamped by FFmpeg to no B frames; a client that
+  sends `ip_period > 1` gets `VA_STATUS_ERROR_INVALID_PARAMETER`.
+- `VAConfigAttribEncPackedHeaders` is `VA_ATTRIB_NOT_SUPPORTED`, so
+  FFmpeg warns "Driver does not support any packed headers (wanted
+  0xd)" once and continues with the firmware's own parameter sets.
+- A 16384x16384 source is rejected by `testsrc2` before the driver sees
+  it; the driver's own bound is the node's 8192.
+
+### Decode regression
+
+The encode work changes `vaDeriveImage` from a snapshot copy to a view
+over the surface's DMA-BUF, and changes node discovery. Both are
+decode-visible, so the decode gates ran again on the same build:
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-matrix.sh` | H.264, HEVC and VP9 48/48 frames each, exact frame MD5 against the native V4L2 decoders; AV1 lane unchanged |
+| Chrome 152.0.7977.82, 20 s window, build-tree driver | H.264 `VaapiVideoDecoder`, platform=true, 599 frames, 4 dropped, GPU process holding the node; HEVC `VaapiVideoDecoder`, platform=true, 601 frames, 2 dropped |
+| Firefox 158.0, H.264 clip | VA session through the driver (`session open node=/dev/video0 codec=H264 1920x1088`, `submit`, `capture configure`), playback advanced to 13.7 s |
+| Chromium 152.0.7977.75 | `FFmpegVideoDecoder`, platform=false: the launcher's documented software fallback for Fedora Chromium ≥ 152, not a driver result |
+
+Firefox needed `LIBVA_V4L2_VIDEO_PATH` and `MOZ_DISABLE_RDD_SANDBOX=1`:
+with the RDD sandbox on, the driver's `/dev/video*` scan is denied in that
+process. That is a pre-existing sandbox boundary, not an encode change.
+
+### What the traces showed
+
+- The SM8550 encoder firmware sends no frame info, so
+  `V4L2_BUF_FLAG_KEYFRAME` is always clear on a CAPTURE completion. The
+  `encode frame` record therefore carries no key flag; the IDR NAL in the
+  stream is the evidence.
+- FFmpeg renders the sequence parameter buffer with the IDR only. The
+  context retains that buffer, otherwise the second picture fails with
+  "no sequence parameters".
+- FFmpeg declares an aligned context (1920x1088) and feeds 1920x1080
+  frames. The encoder geometry therefore comes from the input surface,
+  with the context as the upper bound; a later surface of a different
+  size is rejected because the node has no `SOURCE_CHANGE`.
