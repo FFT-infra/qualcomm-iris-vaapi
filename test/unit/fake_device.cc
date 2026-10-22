@@ -428,6 +428,22 @@ void FakeDevice::complete_one()
     } else {
         capture_queue_.pop_front();
     }
+    if (altref_superframe_) {
+        // A VP9 alt-ref is one VA picture the firmware decodes as two: the
+        // invisible frame completes first with the ERROR flag, no
+        // picture-type bit and no payload, under the same token the visible
+        // one will carry. Only the second completion has pixels.
+        altref_superframe_ = false;
+        Dequeued invisible;
+        invisible.index = slot;
+        invisible.flags = V4L2_BUF_FLAG_ERROR;
+        invisible.timestamp_us = au.timestamp;
+        invisible.bytesused = 0;
+        capture_done_.push_back(invisible);
+        require(!capture_queue_.empty(), "fake: no free CAPTURE slot for the visible frame");
+        slot = capture_queue_.front();
+        capture_queue_.pop_front();
+    }
     Dequeued done;
     done.index = slot;
     done.timestamp_us = au.timestamp;

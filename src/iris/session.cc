@@ -556,6 +556,20 @@ bool Session::handle_capture_returns()
                 continue;
             }
             Target& target = *it->second;
+            if (noshow_shape && !target.hidden) {
+                // A VP9 alt-ref is one VA picture the firmware decodes as
+                // two. The invisible frame completes first with ERROR, no
+                // picture-type bit and no payload, under the same token the
+                // visible frame will carry. Its pixels arrive on that second
+                // completion, so this one is not a failure: keep the target
+                // pending and let the next completion publish it. A picture
+                // the firmware really rejected carries a picture-type bit
+                // (0x4049 for the truncated HEVC in TEST-RESULTS) and falls
+                // through to the failure below.
+                trace_("capture token=%llu index=%u flags=%#x publish=invisible",
+                    static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
+                continue;
+            }
             pending_.erase(it);
             target.pending = false;
             if (noshow_shape && target.hidden) {

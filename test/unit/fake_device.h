@@ -60,6 +60,11 @@ public:
         timestamped_errors_ = count;
         timestamped_error_flags_ = extra_flags;
     }
+    // Model a VP9 alt-ref superframe: the next picture completes twice under
+    // one token, first as an ERROR completion with no picture-type bit and no
+    // payload, then normally. The firmware does this for the invisible frame
+    // the translator packed a show_existing_frame into.
+    void inject_altref_superframe() { altref_superframe_ = true; }
     // Return EBUSY from START this many times.
     void inject_start_busy(unsigned count) { start_busy_ = count; }
     // After the next AU, announce a new resolution.
@@ -167,6 +172,7 @@ private:
     unsigned output_errors_ = 0, error_markers_ = 0, start_busy_ = 0;
     unsigned timestamped_errors_ = 0;
     uint32_t timestamped_error_flags_ = 0;
+    bool altref_superframe_ = false;
     std::optional<std::pair<unsigned, unsigned>> pending_drc_;
     bool capture_eio_ = false;
     bool auto_tick_ = true;

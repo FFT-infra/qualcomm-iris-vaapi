@@ -273,7 +273,10 @@ void test_timestamped_corrupt_completion_fails_target_at_once()
     // With packaging/kernel/0004-* an error completion keeps its timestamp,
     // so the failed picture is named and its surface fails on the spot. The
     // stock behavior — no token, wait for the drain — is covered by
-    // test_firmware_error_marker_is_never_published.
+    // test_firmware_error_marker_is_never_published. A rejected picture
+    // carries a picture-type bit (the truncated HEVC in TEST-RESULTS came
+    // back as 0x4049, ERROR|KEYFRAME); that bit is what separates it from
+    // the invisible half of a VP9 alt-ref superframe.
     Harness h;
     h.fake->set_auto_tick(false);
     Target a;
@@ -281,7 +284,7 @@ void test_timestamped_corrupt_completion_fails_target_at_once()
     h.fake->tick(1);
     h.session->service();
     CHECK(a.completed && !a.error);
-    h.fake->inject_timestamped_errors(1);
+    h.fake->inject_timestamped_errors(1, V4L2_BUF_FLAG_KEYFRAME);
     Target b;
     h.submit(b);
     h.fake->tick(1);
@@ -314,6 +317,33 @@ void test_timestamped_hidden_picture_is_published_not_failed()
     h.session->service();
     CHECK(b.completed && !b.error);
     CHECK(h.session->stats().errors == 0);
+}
+
+void test_vp9_altref_superframe_is_one_picture()
+{
+    // A VP9 alt-ref access unit is one VA picture that the firmware decodes
+    // as two: an invisible frame that completes with the ERROR flag, no
+    // picture-type bit and no payload, then the visible frame under the same
+    // token. On a kernel with 0004 the invisible completion carries its
+    // timestamp, so it looks exactly like a named corrupt picture unless the
+    // shape says otherwise. It must not fail the target: the pixels arrive
+    // on the second completion, and dropping the target turns the real frame
+    // into a misplaced drop.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_altref_superframe();
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
 }
 
 void test_eio_fails_session_and_all_pending()
@@ -729,6 +759,7 @@ int main()
         { "timestamped corrupt completion fails target at once",
             test_timestamped_corrupt_completion_fails_target_at_once },
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
+        { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
