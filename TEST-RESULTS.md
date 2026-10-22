@@ -106,13 +106,12 @@ and replacement endpoints without exposing private network addresses.
 - HEVC is advertised automatically when the node exposes stateful HEVC. The VA
   long format does not carry the original VPS/SPS/PPS, so the driver generates
   parameter sets from VA metadata; this path passes the strict 48-frame
-  content/EOS matrix and repeated cold-start runs on both SM8550 tablets. Set
-  `V4L2_VA_DISABLE_HEVC_STATEFUL=1` for firmware with a non-standard contract.
-- AV1 VA is deliberately disabled by default. FFmpeg's VA-API path supplies
-  tile payloads (the first byte is not an OBU header), while Iris stateful AV1
-  requires a complete temporal-unit OBU stream. The experimental translator
-  can be enabled with `V4L2_VA_ENABLE_AV1_STATEFUL=1`, but native V4L2 AV1 is
-  the only passing AV1 path until an OBU-preserving VA caller is available.
+  content/EOS matrix and repeated cold-start runs on both SM8550 tablets.
+- AV1 is advertised automatically when the node exposes stateful AV1. The
+  translator rebuilds complete temporal units from the VA tile payloads, so
+  the OBU requirement recorded here earlier is met by the driver and not by
+  the caller. `src/util/options.cc` no longer reads a switch for either codec;
+  the qualified AV1 record is the 2026-10-22 section below.
 
 ## Deployment note
 
