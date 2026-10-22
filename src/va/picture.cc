@@ -78,11 +78,40 @@ void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit
     s.target.width = s.width;
     s.target.height = s.height;
     s.target.fourcc = s.fourcc;
+    s.target.hidden = au.hidden;
     s.failed = false;
     c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
+    // The picture is in the session now: a client waiting for this surface
+    // (it was deferred, AV1) can go on to wait for the frame itself.
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        s.unsent = false;
+    }
+    d.released.notify_all();
 }
 
 } // namespace
+
+bool release_held_picture(DriverData& d, Context& c)
+{
+    if (!c.translator)
+        return false;
+    std::lock_guard<std::mutex> translate(c.translate_mutex);
+    iris::codec::AccessUnit tail;
+    if (!c.translator->flush(tail) || tail.bytes.empty())
+        return false;
+    std::shared_ptr<Surface> target;
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        auto it = d.surfaces.find(tail.released_surface);
+        if (it != d.surfaces.end())
+            target = it->second;
+    }
+    if (!target)
+        return false;
+    submit(d, c, *target, tail);
+    return true;
+}
 
 VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int height, int flags,
     VASurfaceID* render_targets, int count, VAContextID* id)
@@ -196,22 +225,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
         }
         // A translator holding a picture (AV1) releases it now; the session
         // decodes it before draining.
-        iris::codec::AccessUnit tail;
-        if (c->translator->flush(tail) && !tail.bytes.empty()) {
-            std::shared_ptr<Surface> target;
-            {
-                std::lock_guard<std::recursive_mutex> lock(d.mutex);
-                auto it = d.surfaces.find(tail.released_surface);
-                if (it != d.surfaces.end())
-                    target = it->second;
-            }
-            if (target) {
-                try {
-                    submit(d, *c, *target, tail);
-                } catch (const iris::Error& error) {
-                    d.trace("va destroy_context flush failed: %s", error.what());
-                }
-            }
+        try {
+            release_held_picture(d, *c);
+        } catch (const iris::Error& error) {
+            d.trace("va destroy_context flush failed: %s", error.what());
         }
         unsigned pending = 0;
         for (auto& s : owned)
@@ -295,6 +312,14 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
         // back to the firmware; a still-pending token is invalidated).
         c->session->release(s->target);
         s->failed = false;
+        // The surface starts a new picture. Its contents are undefined from
+        // here (VA), so a client asking for them waits for nothing: what it
+        // would read is the picture being decoded now.
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            s->unsent = false;
+        }
+        d.released.notify_all();
         if (s->target.frame && d.copier)
             d.copier->forget(s->target.frame->id());
         s->target.frame.reset();
@@ -438,17 +463,25 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
         }
         // The VA buffers referenced by c->picture stay valid until the
         // client destroys them, which VA forbids before vaEndPicture returns.
+        uint32_t held = VA_INVALID_ID;
         try {
+            std::lock_guard<std::mutex> translate(c->translate_mutex);
             c->translator->translate(c->picture, c->au);
+            held = c->translator->held_surface();
         } catch (const iris::Error&) {
             s->failed = true;
             throw;
         }
+        // The picture just translated is held until its successor, whether
+        // or not this call also released the previous one. Its surface has
+        // no pixels until then; a client that asks for them waits for the
+        // release (surface.cc) instead of reading a frame that is not there.
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            if (held == current)
+                s->unsent = true;
+        }
         if (c->au.deferred) {
-            // AV1 holds every picture until its successor. The surface is
-            // "rendering" from the client's point of view; mark it pending
-            // on a token the session does not know yet by leaving the
-            // target untouched and reporting Rendering until the release.
             d.trace("va end_picture ctx=%u surface=%u deferred", id, current);
             return VA_STATUS_SUCCESS;
         }

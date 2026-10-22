@@ -70,9 +70,8 @@ The package installs the driver into libva's driver directory, a browser
 launcher that resolves the Iris decoder node at runtime, and desktop entries
 for the VA-only and the separate Vulkan/WebGPU experiment profiles.
 
-VA VP9 is deliberately withdrawn on the qualified target and VA AV1 is not
-advertised; see data/iris-codec-capabilities.json for the machine-readable
-support boundary.
+VA advertises H.264, HEVC, VP9 and AV1 decode, and H.264/HEVC encode; see
+data/iris-codec-capabilities.json for the machine-readable support boundary.
 
 %prep
 %autosetup -n %{forgename}-%{version}

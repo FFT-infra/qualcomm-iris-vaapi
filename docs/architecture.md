@@ -398,9 +398,8 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
-| `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1 (qualification runs only). |
 
-Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
+Seven switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
 and `options.cc` in sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -432,6 +431,11 @@ session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> 
 submit token=<n> bytes=<n> output=<i>
 capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mmap|import firmware-min=<n>
 capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
+capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
+                                                                     (AV1 hidden picture: the node
+                                                                      returns it with no pixels and
+                                                                      a zero timestamp; attributed by
+                                                                      decode order, still published)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
 capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
@@ -465,6 +469,8 @@ va destroy_context id=<n> entrypoint=encslice frames=<n>
 va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
+va end_picture ctx=<n> surface=<n> deferred                     (AV1: the picture is held until
+                                                                 the next AU names its slots)
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
@@ -474,6 +480,9 @@ encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
+va sync released the held picture surface=<n>        (the sync bound expired at end of
+                                                      stream; the held AV1 picture is
+                                                      submitted as final)
 ```
 
 ## 9. Phases and gates
@@ -488,7 +497,7 @@ ends with a tag. Gates are commands, not opinions.
 | — | Kernel track, documented only: encoder loop-filter controls (`packaging/kernel/0002-*`, rebased and checked to apply on a pristine `sheng-7.2.6` tree) | Patch applies with `git am` and the six capabilities appear once in `inst_fw_cap_sm8550_enc`; **no hardware gate yet** — the controls have not been built into a module or exercised | (not tagged) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
-| 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
+| 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome 152 acceptance; qualified 2026-10-22, see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
 | 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce; `encode-params` for the translation and the request rejections, `annexb` for what a requested IDR carries; on the target, one-second segments cut at `-force_key_frames` in both codecs and a 24 fps run past every GOP boundary | (in `feat/encode-entrypoints`) |
@@ -526,7 +535,8 @@ them).
    `/dev/videoN` appears nowhere in code, launcher or packaging.
 7. Every environment variable is read exactly once, in one file.
 8. A firmware error marker (ERROR flag, zero timestamp, or empty payload)
-   is never published.
+   is never published, with one exception: the node returns an AV1 hidden
+   picture exactly that way, and invariant 18 is what tells them apart.
 9. Import keeps exactly one client buffer with the firmware at a time, and
    every submitted picture gets its buffer even after its surface was
    released; a completion whose token does not match its buffer's token
@@ -568,6 +578,21 @@ them).
     the client may close its own. Any other geometry, modifier or object
     count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
     decoded into the wrong pixels.
+17. An AV1 picture is submitted only once its refreshed slots are known: VA
+    carries no `refresh_frame_flags`, so the translator recovers them from
+    the next picture's `ref_frame_map` (a shown key or switch frame refreshes
+    all eight by definition). Until then its surface reports
+    `VASurfaceRendering`, and `vaSyncSurface`, `vaGetImage`, `vaDeriveImage`
+    and `vaExportSurfaceHandle` release it rather than read it. When the sync
+    bound expires at end of stream the picture is submitted as final and
+    refreshes no slot; a following non-intra picture then fails with
+    `VA_STATUS_ERROR_OPERATION_FAILED` instead of decoding against slots
+    nobody can name.
+18. An AV1 hidden picture (`show_frame=0`) is published, not failed. The node
+    returns it with the ERROR flag, a zero timestamp, no KEYFRAME/PFRAME/
+    BFRAME bit and zero bytes used; only the oldest pending target whose
+    `Target::hidden` is set may take it, so an alt-ref can never land on a
+    shown picture's surface.
 
 ## 11. How work is divided
 

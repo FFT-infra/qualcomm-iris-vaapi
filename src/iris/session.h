@@ -56,6 +56,9 @@ struct Target {
     FrameRef frame; // Direct: the held CAPTURE slot
     bool completed = false;
     bool error = false;
+    // The picture is decoded but never displayed (AV1 show_frame=0). The
+    // node returns it without pixels, and that is not a decode failure.
+    bool hidden = false;
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy / Import: where pixels go
     unsigned width = 0, height = 0;
@@ -150,7 +153,7 @@ private:
     void handle_events();
     void handle_output_returns();
     bool handle_capture_returns(); // returns true when LAST was seen
-    void publish(Target& target, FrameRef frame, const Dequeued& completion);
+    void publish(Target& target, FrameRef frame, const Dequeued& completion, const char* event = nullptr);
     // Import pools: hand the firmware the next client buffer from the
     // backlog when none is in flight. The firmware picks any queued buffer
     // for the picture it finishes, so it is never given more than one to

@@ -31,7 +31,7 @@ Firefox 用的是同一个驱动，也都欢迎，只是它们本来就有各自
 | HEVC Main | 硬件解码 | Import，零拷贝 | 逐帧 MD5 一致；Fluster JCT-VC-HEVC_V1 111/147（固件 112） |
 | HEVC Main10（P010） | 硬件解码 | Import，零拷贝 | 10-bit 逐帧 MD5 一致 |
 | VP9 Profile 0 / 2 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，8-bit 和 10-bit |
-| AV1 | 不对外声明 | 仅手动开启 | OBU 重组逐比特一致，但 VA 客户端第一个画面就失败（见限制） |
+| AV1 Profile 0 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，alt-ref 与无 alt-ref 流都验证过 |
 
 "硬件解码"的标准：Chrome 的 media 面板报告 `VaapiVideoDecoder`、平台解码器
 标志为真、30 秒窗口内有解码帧数且零丢帧。节点被打开、GPU 进程在跑，这些都
@@ -140,12 +140,15 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   一个缓冲区时，每遇到一次 alt-ref 会话就卡约 500 ms；挂两个时固件自己挑
   缓冲区，大约四分之一的完成结果落错位置。要等翻译器做到一张图一个访问
   单元之后才能换 Import。
-- **AV1 只能手动开，而且在 VA 上解不出来。** 隐藏帧（`show_frame=0`）固件不返回
-  CAPTURE 缓冲区，VA 又没有 `show_existing_frame` 这种调用；另外翻译器要拿到下一帧
-  的参考表才能补出 `refresh_frame_flags`，所以每张图都要压后一帧提交，客户端下载时
-  这张表面还没有像素。两个问题都在每路流的第一个画面就出现。OBU 重组在
-  `test/av1-obu-roundtrip.sh` 下逐比特一致；实际使用走原生 V4L2（`v4l2av1dec`）。
-  `V4L2_VA_EXPERIMENTAL_PROFILES=1` 只在验证时声明该 profile。
+- **AV1 会压后一张图。** VA 不提供 `refresh_frame_flags`，翻译器只能等下一个
+  访问单元的参考表，才能知道这张图刷新了哪些槽位。客户端只要领先一张图解码
+  （FFmpeg 带滤镜或下载、Chrome 都是），就完全感觉不到。先提交一张图、再去
+  `vaSyncSurface` 等它、然后才提交下一张的客户端，会一直等到同步上限；流结束
+  时上限到期，压后的图按最后一帧释放，如果后面还有非帧内图，会以一个明确的
+  错误失败，而不是解出错像素。固件对隐藏帧（`show_frame=0`）不返回像素，会话
+  按解码顺序把它认出来并照常发布，因为 FFmpeg 之后会用 `show_existing_frame`
+  把它显示出来。因此 Import 仍然只走拷贝路径，声明的也只有 AV1 Profile 0
+  （8-bit NV12）。
 - **原版内核上 Chrome 走 Copy。** 没有解码顺序控制项时会话运行在显示顺序
   模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空，Import 被拒绝。
 - **导入的 surface 必须符合 CAPTURE 布局。** 客户端 DMA-BUF 只要带 tiling
@@ -245,4 +248,3 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
 | `V4L2_VA_COPY` | `gpu` | 往客户端预先导出的 surface 里发布画面时用的引擎：`gpu`（Adreno 上的 EGL blit）或 `cpu`。 |
 | `V4L2_VA_PUBLISH` | `auto` | 对所有 surface 强制 `copy`、`direct` 或 `import` 发布。仅诊断用；`auto` 按客户端导出行为逐 surface 选择（解码后导出走 Direct，解码顺序内核上的预导出走 Import，其余走 Copy）。会话无法满足 `import` 时退回 `copy`。 |
 | `V4L2_VA_DUMP` | 关 | 把每个提交的访问单元写进这个目录。 |
-| `V4L2_VA_EXPERIMENTAL_PROFILES` | 关 | 额外声明 AV1。仅用于验证，启动器从不设置。 |

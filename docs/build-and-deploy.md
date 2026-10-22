@@ -170,8 +170,9 @@ Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
 OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the
 device boot ID before and after. Small videos may fall below Chromium's
 hardware-decoder performance threshold, so a low-resolution
-`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC and VP9
-are the qualified VA profiles; AV1 is opt-in (see README). Validate Google
+`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC, VP9 and
+AV1 are the qualified VA profiles (each with its own caveat in the README).
+Validate Google
 Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
 result says nothing about this driver.
 

@@ -54,7 +54,6 @@ Options Options::from_environment()
     }
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;
-    options.experimental_profiles = env("V4L2_VA_EXPERIMENTAL_PROFILES") != nullptr;
     return options;
 }
 

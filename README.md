@@ -35,7 +35,7 @@ Chrome 152.
 | HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 111/147 (firmware 112) |
 | HEVC Main10 (P010) | hardware decoder | Import, zero-copy | frame MD5 equal at 10-bit |
 | VP9 Profile 0 / 2 | hardware decoder | GPU blit (see limits) | frame MD5 equal, 8- and 10-bit |
-| AV1 | not advertised | opt-in only | OBU rebuild bit-exact, but VA clients fail at the first picture (see limits) |
+| AV1 Profile 0 | hardware decoder | GPU blit (see limits) | frame MD5 equal, alt-ref and no-alt-ref streams |
 
 "Hardware decoder" means Chrome's media surface reports `VaapiVideoDecoder`
 with the platform flag set and a decoded-frame count over a 30 s window with
@@ -162,15 +162,18 @@ is usable as an encode input as well.
   per alt-ref; with two, the firmware chooses the buffer itself and about a
   quarter of the completions land in the wrong one. Copy until the
   translator submits one access unit per picture.
-- **AV1 is opt-in and does not decode through VA here.** The firmware
-  returns no CAPTURE buffer for hidden (`show_frame=0`) pictures and VA has
-  no `show_existing_frame` call; on top of that, the translator must hold
-  each picture until the next one to recover `refresh_frame_flags`, so a
-  client downloads a surface before its picture is submitted. Both failures
-  hit the first picture of every stream. The OBU rebuild is bit-exact under
-  `test/av1-obu-roundtrip.sh`; use native V4L2 (`v4l2av1dec`) instead.
-  `V4L2_VA_EXPERIMENTAL_PROFILES=1` advertises the profile for qualification
-  only.
+- **AV1 holds one picture.** VA carries no `refresh_frame_flags`, so the
+  translator keeps each AV1 picture until the next access unit's reference
+  map names the slots it refreshed. A client that decodes with a lead of one
+  picture (FFmpeg with any filter or download, Chrome) never notices. A
+  client that submits one picture and then syncs its surface before
+  submitting the next waits for the sync bound; at end of stream that bound
+  expires and the held picture is released as final, and a following
+  non-intra picture fails with a clear error instead of decoding wrong.
+  The firmware also returns a hidden (`show_frame=0`) picture without pixels;
+  the session attributes it by decode order and publishes it, because
+  FFmpeg shows it later through `show_existing_frame`. Import therefore
+  stays on the copy path, and only AV1 Profile 0 (8-bit NV12) is advertised.
 - **Stock kernel means Copy for Chrome.** Without the decode-order control
   the session runs in display-order mode: bounded sync waits plus one
   STOP/LAST/START drain on timeout, and Import is refused.
@@ -287,4 +290,3 @@ the launcher sets none of them.
 | `V4L2_VA_COPY` | `gpu` | Engine used to publish a frame into a surface the client exported before its first decode: `gpu` (EGL blit on Adreno) or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` publication for every surface. Diagnostics only; `auto` picks per surface from the client's export behaviour (Direct for post-decode exporters, Import for pre-exporters on a decode-order kernel, Copy otherwise). `import` degrades to `copy` where the session cannot honour it. |
 | `V4L2_VA_DUMP` | off | Directory to write every submitted access unit into. |
-| `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1. Qualification only; the launcher never sets it. |

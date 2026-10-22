@@ -96,23 +96,15 @@ Capabilities probe_capabilities(const iris::Options& options)
     caps.nv12 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_NV12);
     caps.p010 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_P010);
 
-    // Profiles: H.264 and HEVC Main are the qualified matrix
-    // (data/iris-codec-capabilities.json). VP9 and AV1 are advertised only
-    // once their hardware gate passes (architecture §9, Phase 5).
+    // Profiles: every entry here is qualified in
+    // data/iris-codec-capabilities.json; a codec is advertised only after its
+    // hardware gate passed (architecture §9, Phase 5).
+    // profile-qualified-begin
     if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12) {
         caps.profiles.insert(VAProfileH264ConstrainedBaseline);
         caps.profiles.insert(VAProfileH264Main);
         caps.profiles.insert(VAProfileH264High);
     }
-    // import-qualified-begin
-    if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12)
-        caps.import_formats.insert(V4L2_PIX_FMT_H264);
-    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
-        caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
-    // import-qualified-end
-    // VP9 is deliberately absent: an alt-ref access unit decodes as two
-    // pictures and a one-buffer Import window stalls the firmware, while two
-    // buffers let it choose the buffer (TEST-RESULTS.md, 2026-09-22).
     if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12) {
         caps.profiles.insert(VAProfileHEVCMain);
         if (caps.p010)
@@ -120,14 +112,31 @@ Capabilities probe_capabilities(const iris::Options& options)
     }
     // VP9 passed its Phase 5 gate on the decode-order module (matrix,
     // 100 context recreations, 100 resolution switches, Chrome 1080p with
-    // alt-ref); see TEST-RESULTS.md. AV1 stays opt-in.
+    // alt-ref); see TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
         caps.profiles.insert(VAProfileVP9Profile0);
         if (caps.p010)
             caps.profiles.insert(VAProfileVP9Profile2);
     }
-    if (options.experimental_profiles && caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
+    // AV1 passed its gate on 2026-10-22 (matrix, FFmpeg over alt-ref and
+    // no-alt-ref streams bit-exact against libdav1d, Chrome 152); see
+    // TEST-RESULTS.md. The translator holds one picture, so a client that
+    // syncs before submitting the next picture waits for the sync bound.
+    if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
+    // profile-qualified-end
+    // Import is qualified per codec, separately from decoding.
+    // import-qualified-begin
+    if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_H264);
+    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
+    // import-qualified-end
+    // VP9 and AV1 are deliberately absent. VP9: an alt-ref access unit
+    // decodes as two pictures, so a one-buffer window stalls the firmware
+    // while two let it choose the buffer. AV1: the translator holds a picture
+    // until the successor arrives, so the client's buffer for it cannot be
+    // queued in lockstep (TEST-RESULTS.md, 2026-09-22 and 2026-10-22).
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.

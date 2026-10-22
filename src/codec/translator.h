@@ -40,6 +40,10 @@ struct Picture {
 struct AccessUnit {
     std::vector<uint8_t> bytes;
     bool sequence_start = false; // IDR / key frame: a safe restart point
+    // The picture decodes but is never displayed (AV1 show_frame=0, a
+    // reference the stream shows later). The node reports it with no output
+    // frame, so its target completes without pixels.
+    bool hidden = false;
     // Set when the translator holds this picture back (AV1) and nothing is
     // to be submitted yet.
     bool deferred = false;
@@ -61,6 +65,10 @@ public:
     virtual bool flush(AccessUnit& out) = 0;
     // The surface the flushed/deferred AU belongs to (AV1 only).
     virtual uint32_t held_surface() const { return VA_INVALID_ID; }
+    // True when the held picture's reference-slot flags are fixed by the
+    // bitstream itself (AV1: a shown key frame refreshes all eight slots), so
+    // it can be submitted now, without its successor.
+    virtual bool held_flags_known() const { return false; }
 };
 
 std::unique_ptr<Translator> make_h264(VAProfile profile);

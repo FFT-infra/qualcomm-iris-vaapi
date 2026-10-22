@@ -25,7 +25,7 @@ for codec, item in entries.items():
 assert entries["h264"]["production"] == "supported"
 assert entries["hevc"]["production"] == "supported"
 assert entries["vp9"]["production"] == "supported" and "VP9Profile0" in entries["vp9"]["va_profiles"]
-assert entries["av1"]["production"] == "fallback" and not entries["av1"]["va_profiles"]
+assert entries["av1"]["production"] == "supported" and "AV1Profile0" in entries["av1"]["va_profiles"]
 # Encode is a separate entrypoint with its own qualification: a codec may
 # decode without encoding, and only what the encoder node exposes may be
 # advertised.
@@ -43,6 +43,13 @@ assert entries["av1"]["encode"]["production"] == "absent"
 # The driver decides the publish policy from its own import table; it must
 # agree with this document in both directions.
 driver = (pathlib.Path(sys.argv[1]).parent.parent / "src/va/driver.cc").read_text()
+# The decode profiles the driver advertises are exactly the qualified ones
+# this document lists for a supported codec.
+block = driver[driver.index("profile-qualified-begin"):driver.index("profile-qualified-end")]
+decode_profiles = set(re.findall(r"VAProfile([A-Za-z0-9_]+)", block))
+want_decode = {p for item in entries.values() if item["production"] == "supported"
+               for p in item["va_profiles"]}
+assert decode_profiles == want_decode, (decode_profiles, want_decode)
 block = driver[driver.index("import-qualified-begin"):driver.index("import-qualified-end")]
 names = {name.upper() for name in re.findall(r"V4L2_PIX_FMT_([A-Za-z0-9_]+)", block)}
 want = {codec.upper() for codec, item in entries.items() if item["publish_import"] == "qualified"}
@@ -56,6 +63,6 @@ want_profiles = {p for item in entries.values() for p in item["encode"]["va_prof
 want_formats = {f for item in entries.values() for f in item["encode"]["v4l2_capture_formats"]}
 assert encode_profiles == want_profiles, (encode_profiles, want_profiles)
 assert encode_formats == want_formats, (encode_formats, want_formats)
-print(f"PASS codec capability matrix entries={len(entries)} import-qualified={sorted(names)}"
-      f" encode-qualified={sorted(encode_profiles)}")
+print(f"PASS codec capability matrix entries={len(entries)} profiles={sorted(decode_profiles)}"
+      f" import-qualified={sorted(names)} encode-qualified={sorted(encode_profiles)}")
 PY

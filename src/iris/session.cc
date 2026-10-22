@@ -502,8 +502,40 @@ bool Session::handle_capture_returns()
             saw_last_ = true;
         }
         if (returned->error() && returned->timestamp_us == 0) {
-            // Firmware error marker: no token, no pixels. Requeued by the
-            // next requeue pass (use count returns to 1 when frame drops).
+            // A picture the firmware decoded but does not show (an AV1
+            // alt-ref) comes back with V4L2_BUF_FLAG_ERROR, no picture-type
+            // bit and no timestamp. It is not a failure: the frame is
+            // decoded, and the stream displays it later with
+            // show_existing_frame, which VA never routes here, so the
+            // client still downloads this surface. The CAPTURE returns
+            // follow decode order, so it belongs to the oldest target
+            // submitted as hidden. Anything else is a real failure marker
+            // with no token it could be trusted against.
+            constexpr uint32_t picture
+                = V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME;
+            auto hidden = pending_.end();
+            if (!(returned->flags & picture)) {
+                for (auto it = pending_.begin(); it != pending_.end(); ++it) {
+                    if (it->second->hidden) {
+                        hidden = it;
+                        break;
+                    }
+                }
+            }
+            if (hidden != pending_.end()) {
+                Target& target = *hidden->second;
+                pending_.erase(hidden);
+                frame->layout().data_offset = returned->data_offset;
+                // A hidden picture carries no output plane in the firmware's
+                // accounting (bytes=0) but it did decode it, and the stream
+                // displays it later through show_existing_frame; publish
+                // what it decoded all the same.
+                publish(target, frame, *returned, "capture noshow");
+                cold_ = false;
+                ++stats_.completed;
+                ++progress_;
+                continue;
+            }
             ++stats_.errors;
             trace_("capture error index=%u flags=%#x", returned->index, returned->flags);
             continue;
@@ -564,7 +596,7 @@ bool Session::handle_capture_returns()
     return last;
 }
 
-void Session::publish(Target& target, FrameRef frame, const Dequeued& completion)
+void Session::publish(Target& target, FrameRef frame, const Dequeued& completion, const char* event)
 {
     const char* how = "direct";
     if (pool_.capture_memory() == CaptureMemory::Import) {
@@ -597,7 +629,7 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
     target.pending = false;
     target.completed = true;
     target.error = false;
-    trace_("capture token=%llu index=%u flags=%#x publish=%s%s",
+    trace_("%s token=%llu index=%u flags=%#x publish=%s%s", event ? event : "capture",
         static_cast<unsigned long long>(completion.timestamp_us), completion.index, completion.flags,
         target.publish == Publish::Copy ? "copy-" : "", how);
 }

@@ -586,6 +586,12 @@ bool write_global_motion_params(BitWriter& writer, const VADecPictureParameterBu
 
 } // namespace
 
+bool av1_refreshes_all_slots(const VADecPictureParameterBufferAV1& picture)
+{
+    const auto& info = picture.pic_info_fields.bits;
+    return info.frame_type == SWITCH_FRAME || (info.frame_type == KEY_FRAME && info.show_frame);
+}
+
 void av1_update_reference_gm(AV1ReferenceState& references, const VADecPictureParameterBufferAV1& picture,
     uint8_t refresh_frame_flags)
 {
@@ -651,8 +657,7 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
     if (!pic.show_frame)
         writer.bit(pic.showable_frame);
 
-    const bool forced_error_resilient
-        = frame_type == SWITCH_FRAME || (frame_type == KEY_FRAME && pic.show_frame);
+    const bool forced_error_resilient = av1_refreshes_all_slots(picture);
     const bool error_resilient = forced_error_resilient ? true : pic.error_resilient_mode != 0;
     if (!forced_error_resilient)
         writer.bit(pic.error_resilient_mode);
@@ -678,8 +683,7 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
         writer.bits(picture.primary_ref_frame, 3);
 
     const uint8_t all_frames = 0xff;
-    const bool refresh_is_implicit
-        = frame_type == SWITCH_FRAME || (frame_type == KEY_FRAME && pic.show_frame);
+    const bool refresh_is_implicit = av1_refreshes_all_slots(picture);
     if (!refresh_is_implicit)
         writer.bits(refresh_frame_flags, 8);
     const uint8_t effective_refresh = refresh_is_implicit ? all_frames : refresh_frame_flags;

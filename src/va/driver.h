@@ -16,6 +16,7 @@
 #include "../util/options.h"
 #include "../util/trace.h"
 
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,6 +63,13 @@ struct Surface {
     // A decode error or a released-while-pending token. Reported by
     // syncSurface until the surface starts a new picture.
     bool failed = false;
+    // AV1: the surface was begun, but its picture cannot be built without
+    // the next one's reference map, so it has not been submitted yet and has
+    // no pixels. A client that asks for them now (vaSyncSurface, vaGetImage,
+    // vaDeriveImage) is waiting on the stream, not on a broken frame: it
+    // blocks until the following picture releases this one, or until the
+    // stream ends.
+    bool unsent = false;
 
     bool rendering() const { return target.pending; }
     bool has_pixels() const { return target.completed && (target.frame || stable); }
@@ -93,6 +101,12 @@ struct Context {
     VAEntrypoint entrypoint = VAEntrypointVLD;
     unsigned width = 0, height = 0;
     std::unique_ptr<iris::codec::Translator> translator;
+    // The translator is stateful and not thread-safe, and two threads reach
+    // it: the decoder thread translating the next picture, and a client
+    // thread (vaSyncSurface/vaGetImage) releasing a held picture at end of
+    // stream. This is the only lock that orders them; it is never taken
+    // while the driver mutex is held.
+    std::mutex translate_mutex;
     // Shared so a vaSyncSurface in flight on another thread keeps the
     // session alive while vaDestroyContext drops the context's reference.
     std::shared_ptr<iris::Session> session;
@@ -144,6 +158,9 @@ struct DriverData {
     // The mutex guards the tables and the objects' scalar fields only. It is
     // never held across a session wait, drain or copy (architecture §7).
     std::recursive_mutex mutex;
+    // A deferred picture's surface (AV1, `unsent`) becomes submitable when a
+    // later picture releases it. A client blocked on that surface waits here.
+    std::condition_variable_any released;
     uint32_t next_id = 1;
     std::map<VAConfigID, Config> configs;
     std::map<VAContextID, std::shared_ptr<Context>> contexts;
@@ -164,6 +181,12 @@ std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id);
 
 // Owning context of a surface, if any (for sync/export/derive).
 std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
+
+// Submit the picture a deferring translator (AV1) still holds, for a stream
+// that has no next picture: the frame is decoded as the last one and refreshes
+// no reference slot. Returns false when nothing was held or its surface is
+// gone. The caller holds nothing; `translate_mutex` is taken here.
+bool release_held_picture(DriverData& d, Context& context);
 
 // Publish policy for the next picture on this surface through `session`.
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session);

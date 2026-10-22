@@ -146,22 +146,24 @@
     },
     {
       "codec": "av1",
-      "production": "fallback",
-      "va_profiles": [],
+      "production": "supported",
+      "va_profiles": [
+        "AV1Profile0"
+      ],
       "v4l2_output_formats": [
         "AV1"
       ],
       "capture_formats": [
         "NV12"
       ],
-      "fallback": "native-v4l2-or-software",
+      "fallback": "software",
       "rejected": [
-        "hidden (show_frame=0) pictures: the firmware returns no CAPTURE for them and VA has no show_existing_frame call",
-        "every stream fails at the first picture: VA AV1 carries no refresh_frame_flags, so the translator holds each picture until its successor arrives, and the firmware returns a CAPTURE only after the next AU is queued",
-        "film grain",
-        "large-scale tile"
+        "film grain synthesis",
+        "10-bit and 12-bit (only AV1Profile0 is advertised)",
+        "large-scale tile (10-bit only)"
       ],
       "publish_import": "fallback",
+      "sync_note": "VA carries no refresh_frame_flags, so the translator holds each picture until the next access unit's reference map names its slots. The firmware also returns a hidden (show_frame=0) picture without pixels; the session attributes it by decode order and publishes it anyway. A client that syncs a held surface before submitting the next picture waits for the sync bound, and at end of stream that bound expires and the picture is released as final",
       "encode": {
         "production": "absent",
         "va_profiles": [],
@@ -172,9 +174,7 @@
           "the IRIS encoder node exposes no AV1 capture format"
         ]
       },
-      "experimental": [
-        "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients fail at the first picture (see rejected)"
-      ]
+      "experimental": []
     }
   ]
 }

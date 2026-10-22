@@ -2015,3 +2015,98 @@ The same request pattern ran ten more times in one session (five H.264,
 five HEVC, 120 frames each): every run exited 0, decoded cleanly and
 carried the same five IDRs, so the lever's per-picture control write does
 not drift the firmware's schedule across sessions.
+
+## AV1 through VA: qualified and advertised (2026-10-22)
+
+Source `f56e13e` plus the working tree that removes the opt-in switch, driver
+SHA-256 `763025cc9941e7bdaa3145912bb9c1ee6458ac7b2ee703f412b66fc1d13bf32d`
+(`source_dirty=true`, build tree only), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`6534c7a2-f3f7-469a-8e29-a4f6ef516f89` (unchanged after every run below).
+
+### What changed since the 2026-09-22 verdict
+
+Three behaviors, all in the driver:
+
+- **The one-picture hold is explicit, not a failure.** VA's AV1 picture
+  buffer carries no `refresh_frame_flags`; the slots a picture refreshes are
+  only visible in the *next* picture's `ref_frame_map`. A shown key frame or
+  switch frame refreshes all eight by definition
+  (`av1_refreshes_all_slots`), so its bits are known at once; any other
+  picture is translated with the next AU and its `vaEndPicture` returns with
+  the surface still unsent. `vaSyncSurface`, `vaGetImage`, `vaDeriveImage`
+  and `vaExportSurfaceHandle` now wait for that release instead of reading a
+  surface with no pixels.
+- **Hidden pictures are published, not counted as errors.** The firmware
+  returns a `show_frame=0` picture with the ERROR flag, a zero timestamp, no
+  KEYFRAME/PFRAME/BFRAME bit and zero bytes used, although it wrote pixels.
+  The session attributes such a completion to the oldest pending target
+  whose `Target::hidden` is set (decode order) and publishes it; a following
+  non-intra picture after an end-of-stream release is refused with
+  `VA_STATUS_ERROR_OPERATION_FAILED` rather than decoded against nameless
+  slots.
+- **End of stream releases the hold.** When the stream ends with a picture
+  still held, the sync bound expires, the picture is submitted as final
+  (refreshing no slot) and the trace records
+  `va sync released the held picture surface=<n>`.
+
+The opt-in switch `V4L2_VA_EXPERIMENTAL_PROFILES` is gone. AV1Profile0 is
+advertised whenever the decoder node enumerates AV1 and NV12, the same rule
+the capability table now encodes (`production: supported`,
+`va_profiles: ["AV1Profile0"]`), and
+`test/iris-codec-matrix-check.sh` checks the `profile-qualified-*` block
+against the table in both directions.
+
+### Evidence
+
+`vainfo` on the build tree, no switch: `VAProfileAV1Profile0 :
+VAEntrypointVLD`.
+
+`test/iris-matrix.sh`, 48 frames, artifacts under
+`~/Lab/iris-vaapi-lab/artifacts/va-matrix`:
+
+| Codec | Result |
+| --- | --- |
+| AV1 | `PASS frames=48 submitted=50 capture=50 drain=1 timeouts=0 drops=0 noshow=23`, content `frame-md5` equal to software |
+| H.264, HEVC, VP9 | unchanged: `submitted=48 capture=48 drops=0 timeouts=0`, content `frame-md5` equal |
+
+Six clips, three runs each, every run's downloaded frames compared with the
+software decode of the same clip (`sweep.sh`, both arms `yuv420p`):
+
+| Clip | Stream shape | Runs |
+| --- | --- | --- |
+| `hw-av1-nolag.mp4` | IPPP, no alt-ref | 3/3 bit-exact |
+| `hw-av1-noaltref.mp4` | no alt-ref | 3/3 |
+| `hw-av1-lag.mp4` | alt-ref, 720p | 3/3 |
+| `allintra.mp4` | all-intra | 3/3 |
+| `n12.webm` | 12-bit source downconverted, alt-ref | 3/3 |
+| `lag720.webm` | 720p, alt-ref | 3/3 |
+
+`hw-av1-nolag.mp4`, 60 frames, with the sync bound cut to 100 ms: `submitted=60
+completed=60 errors=0 drops=0 timeouts=0`, downloaded frames bit-exact. A
+pipelined client never waits on the hold, so the bound is not part of normal
+operation.
+
+`test/av1-obu-roundtrip.sh`, no switch: `PASS rebuilt=18 source=32 all rebuilt
+frames bit-exact` against libdav1d.
+
+Chrome 152, `av1-browser.webm`, 25 s windows:
+
+| Run | Decoder | Platform | Frames / dropped | Node holder |
+| --- | --- | --- | --- | --- |
+| 1 | `VaapiVideoDecoder` | true | 748 / 15 | `--type=gpu-process` |
+| 2 | `VaapiVideoDecoder` | true | 747 / 4 | `--type=gpu-process` |
+
+The two drop counts differ on the same clip and build; the second run had
+the tablet to itself. Chrome pre-exports its surfaces, and AV1 Import is
+refused (the held picture's client buffer cannot be queued in lockstep), so
+Chrome publishes through the GPU copy engine.
+
+### Client contract
+
+A client that submits picture N, syncs its surface and only then submits
+picture N+1 cannot be served in one round trip: it waits for the sync bound
+and gets N released as final. FFmpeg and Chrome both keep at least one AU
+in flight, so neither hits it. This is invariant 17 in
+`docs/architecture.md`; the failure is a clear `OPERATION_FAILED`, never
+pixels from the wrong picture.

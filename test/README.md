@@ -47,9 +47,10 @@ and keeps artifacts under `$IRIS_LAB_ROOT/artifacts/` by default:
 LIBVA_DRIVERS_PATH=$PWD/build/src ./test/iris-matrix.sh
 ```
 
-H.264, HEVC and VP9 run through VA and must match software exactly; AV1 runs
-its native GStreamer baseline only (its VA lane is opt-in and documented in
-the README). `IRIS_MATRIX_FRAMES` shortens a development run.
+H.264, HEVC, VP9 and AV1 run through VA and must match software exactly;
+AV1's lane passes `--hidden-pictures` because the stream's alt-ref pictures
+are decoded but shown later by the client. `IRIS_MATRIX_FRAMES` shortens a
+development run.
 
 `test/iris-structure-matrix.sh` isolates H.264 reference structure: all-I,
 IP-only, B=2 and B=4 streams with exact MD5 equality. Keep GOP-middle
