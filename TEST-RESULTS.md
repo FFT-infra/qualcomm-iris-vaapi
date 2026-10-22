@@ -2018,9 +2018,9 @@ not drift the firmware's schedule across sessions.
 
 ## AV1 through VA: qualified and advertised (2026-10-22)
 
-Source `f56e13e` plus the working tree that removes the opt-in switch, driver
-SHA-256 `763025cc9941e7bdaa3145912bb9c1ee6458ac7b2ee703f412b66fc1d13bf32d`
-(`source_dirty=true`, build tree only), kernel
+Source `52047fd`, driver SHA-256
+`763025cc9941e7bdaa3145912bb9c1ee6458ac7b2ee703f412b66fc1d13bf32d`
+(`source_dirty=false`, build tree only), kernel
 `7.2.6-sm8550-g42f3b40-iris1`, boot ID
 `6534c7a2-f3f7-469a-8e29-a4f6ef516f89` (unchanged after every run below).
 
