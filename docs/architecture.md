@@ -42,17 +42,24 @@ with a self-built kernel from `ianchb/sm8550-mainline` (Iris is the
 `qcom-iris` module, HFI gen2). Because the kernel is self-built, kernel-side
 fixes are in scope.
 
-Two Iris kernel changes from `strongtz/libva-v4l2` (Radxa, Xilin Wu) are
-adopted as part of the target. They were first applied to a `sheng-7.2.2`
-tree; after the target moved to `kernel-sheng-7.2.6-1` the rebased patch and
-the module-only build recipe live in `packaging/kernel/`:
+Three Iris kernel changes from `strongtz/libva-v4l2` (Radxa, Xilin Wu) are
+adopted as part of the target. The first two were first applied to a
+`sheng-7.2.2` tree; after the target moved to `kernel-sheng-7.2.6-1` the
+rebased patches and the module-only build recipe live in
+`packaging/kernel/`:
 
 | Patch | What it changes | Why the driver needs it |
 | --- | --- | --- |
 | decode-order output (`V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE`, delay 0) | Firmware returns pictures in decode order instead of display order | A VA client may `vaSyncSurface` a picture before submitting the ones it is reordered behind. Display-order firmware withholds it, and the only userspace escape is a timeout plus STOP/START drain. In decode order every submitted picture completes independently. |
 | CAPTURE pool up to 64 buffers | Raises the vb2 `max_num_buffers` for the gen2 decoder CAPTURE queue | Threaded VA clients keep more than 32 surfaces; a driver-owned pool needs headroom above the client's pool. |
+| encoder loop-filter controls | Exposes `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` and the HEVC equivalents, sent as `HFI_PROP_DEBLOCKING_MODE` | VA carries deblocking per slice (mode, alpha, beta); the stock kernel has no control to carry it to the firmware, so a non-default request is refused instead of being silently ignored. |
 
-The driver **must not require** the patches. It probes for the display-delay
+The third is documented and rebased but **not qualified**: the controls have
+not been exercised on hardware, so the driver keeps its refusal path and
+TEST-RESULTS.md has no run that shows a non-default filter reaching the
+firmware.
+
+The driver **must not require** any of these. It probes for the display-delay
 control at session open and runs in one of two session modes:
 
 - **decode-order** (control present): sync waits are bounded by the normal
@@ -478,6 +485,7 @@ ends with a tag. Gates are commands, not opinions.
 | --- | --- | --- | --- |
 | 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
 | 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept (rebased onto `sheng-7.2.6` later; `packaging/kernel/`) | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
+| — | Kernel track, documented only: encoder loop-filter controls (`packaging/kernel/0002-*`, rebased and checked to apply on a pristine `sheng-7.2.6` tree) | Patch applies with `git am` and the six capabilities appear once in `inst_fw_cap_sm8550_enc`; **no hardware gate yet** — the controls have not been built into a module or exercised | (not tagged) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
@@ -537,8 +545,9 @@ them).
     `encode-qualified-*` block in `src/va/driver.cc` must match it exactly.
 13. A client request the encoder cannot honour fails with
     `VA_STATUS_ERROR_UNIMPLEMENTED`, never a stream that quietly used
-    something else. That covers slice deblocking the kernel has no control
-    for, more than one slice per picture, tiles and wavefront coding,
+    something else. That covers slice deblocking on a kernel without the
+    loop-filter controls (the stock SM8550 kernel; §2 lists the patch that
+    adds them), more than one slice per picture, tiles and wavefront coding,
     weighted prediction, scaling lists, chroma QP offsets and several
     reference indexes — the firmware writes the sequence headers, owns the
     reference structure and chooses the quantisation, so none of them can be

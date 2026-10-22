@@ -63,12 +63,14 @@ geometry. A VA context that only returns bytes proves nothing.
   because the number moves between boots).
 - Any Linux distribution that can load a libva module. Fedora 44 is the
   qualified one; Fedora and Arch packaging is provided.
-- Optionally, two Iris kernel patches (decode-order output and a 64-buffer
-  CAPTURE pool) from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2),
-  carried rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
+- Optionally, three Iris kernel changes (decode-order output, a 64-buffer
+  CAPTURE pool and the encoder loop-filter controls) from
+  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2), carried
+  rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
   module-only build recipe. On a stock kernel the driver detects their
   absence and still works; Chrome then gets a GPU copy per frame instead of
-  the zero-copy path.
+  the zero-copy path, and an encoder deblocking request other than the
+  firmware default is refused.
 
 ## Install and use
 
@@ -226,12 +228,13 @@ is usable as an encode input as well.
   the client's one chance to ask for filtering to be off or throttled, and
   the driver forwards them to
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (and the HEVC
-  equivalents) when the kernel has them. The SM8550 kernel does not, and
-  there the firmware always filters with the default 0/0 offsets, so any
+  equivalents) when the kernel has them. The stock SM8550 kernel does not,
+  and there the firmware always filters with the default 0/0 offsets, so any
   other request fails with `VA_STATUS_ERROR_UNIMPLEMENTED` instead of coming
-  back as a stream that ignores it. Deblocking is per-context in V4L2 and
-  per-slice in VA, so it is read from the first slice and changing it
-  mid-context needs a new context.
+  back as a stream that ignores it. [`packaging/kernel/`](packaging/kernel/README.md)
+  carries the kernel patch that adds the controls. Deblocking is per-context
+  in V4L2 and per-slice in VA, so it is read from the first slice and changing
+  it mid-context needs a new context.
 
 ## Development
 
@@ -262,7 +265,7 @@ MIT with LGPL-2.1-covered parts, the same terms as upstream; see `COPYING`,
   the browser acceptance gates and the packaging are this fork's work.
 - `include/linux/` vendors the kernel UAPI headers under their own SPDX tag
   (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
-- `packaging/kernel/` carries the two Iris kernel patches from
+- `packaging/kernel/` carries three Iris kernel changes from
   [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa, Xilin
   Wu). They touch GPL-2.0 kernel code and carry that license, not the
   driver's. The explicit-RPS HEVC slice rewrite follows the same project's

@@ -57,10 +57,10 @@ entrypoint 的程序。
 - 任何能加载 libva 模块的 Linux 发行版。Fedora 44 是合格过的；提供 Fedora
   和 Arch 的打包。
 - 可选：来自 [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-  的两个 Iris 内核补丁（按解码顺序出帧、CAPTURE 池上限 64），已 rebase 后放在
-  [`packaging/kernel/`](packaging/kernel/README.md)，附只重编模块的步骤。
-  原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome 每帧多一次 GPU
-  拷贝，拿不到零拷贝。
+  的三项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块滤波
+  控制项），已 rebase 后放在 [`packaging/kernel/`](packaging/kernel/README.md)，
+  附只重编模块的步骤。原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome
+  每帧多一次 GPU 拷贝，拿不到零拷贝；编码器上非默认的去块请求也会被拒绝。
 
 ## 安装和使用
 
@@ -191,10 +191,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   能提出关掉滤波或调偏移量的地方；内核有这个控制项时，驱动把
   `disable_deblocking_filter_idc`、alpha/beta 转给
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA`（HEVC 有对应
-  的 tc/beta）。SM8550 的内核没有这些控制项，固件永远按默认的 0/0 滤波，
+  的 tc/beta）。出厂 SM8550 内核没有这些控制项，固件永远按默认的 0/0 滤波，
   所以这时任何非默认请求都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，而不是交出
-  一段没照做的流。V4L2 里去块是每个 context 一个值，VA 里是每个 slice 一个
-  值，取值只看第一个 slice，同一个 context 里改动要新建 context。
+  一段没照做的流；加控制项的内核补丁在
+  [`packaging/kernel/`](packaging/kernel/README.md)。V4L2 里去块是每个 context
+  一个值，VA 里是每个 slice 一个值，取值只看第一个 slice，同一个 context 里
+  改动要新建 context。
 
 ## 开发
 
@@ -224,7 +226,7 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
 - `include/linux/` 内置的内核 UAPI 头文件带各自的 SPDX 标记
   （`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`）。
 - `packaging/kernel/` 携带 [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-  （Radxa，Xilin Wu）的两个 Iris 内核补丁。它们改的是 GPL-2.0 的内核代码，
+  （Radxa，Xilin Wu）的三项 Iris 内核改动。它们改的是 GPL-2.0 的内核代码，
   许可证也是 GPL-2.0，与驱动本身不同。HEVC 显式 RPS 的 slice 重写沿用了
   同一项目的做法。
 
