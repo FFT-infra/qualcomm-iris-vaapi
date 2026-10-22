@@ -2263,3 +2263,98 @@ kernel half, not a hardware run. Installing it means replacing the module
 and rebooting, which needs the target's owner; until then the driver's
 probe finds no control and takes the `intra-period` path, which is the one
 the records above measured.
+
+## `REQUEST_SYNC_FRAME` on the target: a direct IDR request (2026-10-22)
+
+The kernel half from the section above was built, installed and booted, and
+the driver-side probe now finds the control. This replaces the intra-period
+lever on the target: `-force_key_frames` reaches firmware as
+`HFI_PROP_REQUEST_SYNC_FRAME` instead of two `GOP_SIZE` writes, and the
+driver adds no parameter sets of its own.
+
+### Build and install
+
+- Source `e9a9a2f` (clean tree), tracked-source SHA-256
+  `d2efb19f27ce92bbda2c3eedfe57daffc130471670559c5da47ce0ba4c8bf6d0`.
+- Driver `build/src/v4l2_drv_video.so`, SHA-256
+  `8c2423e7f786a45dc2a10bc8c1c8d1e3bcfa2f610fe0a6cf42dcb87ec4d09823`,
+  deployed with `test/remote/deploy.sh` to the build tree
+  (`LIBVA_DRIVERS_PATH`), not the installed package.
+- Module built from `42f3b40c702a` + 0001 + 0002 + 0003, target
+  `/boot/config-7.2.6-sm8550-g42f3b40` (`CONFIG_LOCALVERSION=""`,
+  `LOCALVERSION_AUTO` off, so `localversion` carries
+  `-sm8550-g42f3b40-iris1`), `Module.symvers` derived from the running
+  kernel's `/proc/kallsyms` so `depends:` matches, no `KCFLAGS` override
+  because this kernel sets `CONFIG_ARM64_BTI` without
+  `CONFIG_ARM64_BTI_KERNEL`. `vermagic`
+  `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64`, note
+  `aarch64 feature: PAC` (the stock module's note is the same), compressed
+  `qcom-iris.ko.zst` SHA-256
+  `802c40c0269fe007e0f2d3fb54ad4dfab8d3089d0fd465f3996130f4d2b0a853`.
+- Boot ID `8a7cc414-751d-44ec-8e20-fe89dd676ab6` (the stock module's boot
+  was `fd1b2389-…`). Decoder `/dev/video1`, encoder `/dev/video2` (resolved
+  by `iris_driver`; the numbers moved at this boot).
+- `v4l2-ctl -d /dev/video2 --list-ctrls` now lists
+  `force_key_frame 0x009909e5 (button) : value=0 flags=write-only,
+  execute-on-write`; the encoder reports 75 controls. `display_delay` is
+  still on the decoder and the six loop-filter controls on the encoder, so
+  0001 and 0002 survived the rebuild.
+
+### Lever in force
+
+`V4L2_VA_TRACE=1` on a 20-frame H.264 encode prints
+`encode idr lever=sync-frame` before `encode open`, so `configure()`
+probed the control and took the direct path.
+
+### Requested IDR positions
+
+1280x720 at 24 fps, `-g 60 -async_depth 4`, 130 frames, CQP 24,
+`ffprobe -show_entries frame=key_frame`:
+
+| Request | IDR positions | Frames | Decode |
+| --- | --- | --- | --- |
+| none | 0, 60, 120 | 130 | ok |
+| `expr:eq(n,24)` | 0, 24, 84 | 130 | ok |
+| `expr:eq(n,10)+eq(n,40)` | 0, 10, 40, 100 | 130 | ok |
+| `expr:eq(n,60)` (a firmware boundary) | 0, 60, 120 | 130 | ok |
+
+The positions and the re-anchoring match the intra-period record above
+exactly, which is the point: the lever changed, the schedule did not.
+
+### What the requested IDR carries
+
+The first access unit of `expr:eq(n,24)` is NAL types 7, 8, 5 (SPS, PPS,
+IDR slice): the firmware wrote the parameter sets itself, as it does for
+its own sync frames. The first unit of the second H.264 segment (cut at a
+requested IDR) is 9, 7, 8, 5 (AUD, SPS, PPS, IDR), and the segment's first
+frame is a key frame. The driver's prefix step finds the sets already in
+the access unit and adds nothing, so no duplicate SPS/PPS appears.
+
+### Segments
+
+24 fps, `-g 60 -force_key_frames expr:gte(t,n_forced*1) -async_depth 4
+-f segment -segment_time 1 -segment_format mpegts`, 240 frames: H.264 and
+HEVC each write 10 segments, every one decodes with `ffmpeg -f null -`,
+and every one starts on a key frame.
+
+### Pipelining and decode
+
+The same build, 1920x1080 HEVC 600 frames CBR 12 Mbit/s `-g 60`, three
+runs each: depth 1 3.597 / 3.631 / 3.134 s, depth 4 1.019 / 1.016 /
+1.004 s. The depth-1 and depth-4 bitstreams are byte-identical
+(`b437ff325d8f300c0d7373022f03be2a999eae5a4f48a52de4a575caf627e32d`),
+read back as 1920x1080 / 600 frames, and decode clean.
+
+The decode matrix on the new module is unchanged: H.264, VP9, HEVC and AV1
+all `PASS … content=frame-md5` with `timeouts=0 drops=0` (AV1
+`submitted=25 capture=25 noshow=8`).
+
+Iris IRQ delta over the IDR and segment runs: 1829.
+
+### Rollback
+
+`~/Lab/kernel-iris-syncframe/` on the target holds the stock module
+(`qcom-iris-stock.ko`, `8e8487ef…`, the decompressed file), the installed
+stock `.zst` (`4e29b74d…`), the new module, the target `Module.symvers` and
+`stock.sha256`. `rollback.sh` restores the stock `.zst` and re-runs
+`depmod`; a reboot is required either way.

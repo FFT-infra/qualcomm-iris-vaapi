@@ -166,16 +166,14 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- **在 stock 内核上，按需 IDR 靠挪 GOP 实现。** 目标机跑的内核分支
-  （7.2.6）没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，所以客户端要 IDR 时，
-  驱动把这一张图的 intra period 设成 0，并在这张图入队之前把周期改回去。
-  固件本身有这个能力，`packaging/kernel/0003-*` 就是暴露它的上游
-  `REQUEST_SYNC_FRAME` 补丁；驱动会探测这个控制项，内核带了就直接用，不动
-  周期。没带补丁的内核上，`-force_key_frames` 配 `-c copy` 或者分段封装，
-  切点仍在它要的位置；下一个自动 IDR 在这一次之后一个 GOP 处，而不是原来的
-  排期上。每张请求 IDR 的图都要多写一次控制项，所以逐帧都请求反而比直接开
-  intra-only 贵。请求出来的 IDR 可以当切点用：它带着固件上一次写出的
-  SPS/PPS（以及 SEI）。
+- **按需 IDR 在目标机上是直接控制项，在 stock 内核上是挪 GOP。** 内核有这个
+  控制项时，请求直接写成 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，用
+  `packaging/kernel/0003-*` 编出来的模块就是这种情况：同步帧和它的参数集都由
+  固件自己写。没带这个补丁的 stock 7.2.6 模块上，驱动把这一张图的 intra
+  period 设成 0，入队前改回去，并补上上一次的 SPS/PPS，因为固件只在自己写的
+  同步帧上带参数集。两种方式切点都在 `-force_key_frames` 要的位置；下一个自动
+  IDR 在这一次之后一个 GOP 处，而不是原来的排期上。走 GOP 那条路时每张请求
+  IDR 的图要多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。

@@ -70,7 +70,8 @@ geometry. A VA context that only returns bytes proves nothing.
   recipe. On a stock kernel the driver detects their absence and still works;
   Chrome then gets a GPU copy per frame instead of the zero-copy path, an
   encoder deblocking request other than the firmware default is refused, and
-  a requested IDR moves the intra period.
+  a requested IDR moves the intra period instead of asking firmware for a
+  sync frame.
 
 ## Install and use
 
@@ -194,19 +195,18 @@ is usable as an encode input as well.
 - **One qualified device.** Everything above was measured on one SM8550
   tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
   packaging is provided but not validated.
-- **On-demand IDR moves the GOP on the stock kernel.** The kernel branch the
-  target runs (7.2.6) exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so a
-  requested IDR is produced by setting the intra period to zero for that one
-  picture and putting it back before the picture is queued. The firmware has
-  the property, and `packaging/kernel/0003-*` carries the upstream
-  `REQUEST_SYNC_FRAME` patch that exposes it; the driver probes for the
-  control and uses it when the kernel has it, leaving the GOP alone. On a
-  kernel without the patch, `-force_key_frames` with a stream copy or a
-  segment muxer still cuts where it asks, and the next automatic IDR is one
-  GOP after the requested one rather than on the original schedule. The
-  intra-period lever is a control write per requested picture, so a request
-  on every frame costs more than a plain intra-only stream. A requested IDR is
-  a cut point: it carries the last SPS/PPS (and SEI) the firmware wrote.
+- **On-demand IDR is a direct control on the target, a GOP move on a stock
+  kernel.** A requested IDR is written as
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when the node has it, which the
+  module built from `packaging/kernel/0003-*` does: firmware writes the sync
+  frame and its parameter sets itself. Without that patch (a stock 7.2.6
+  module) the driver sets the intra period to zero for that one picture,
+  puts it back before queueing, and prefixes the last SPS/PPS because the
+  firmware only writes them on its own sync frames. Both shapes cut where
+  `-force_key_frames` asks, and the next automatic IDR is one GOP after the
+  requested one rather than on the original schedule. On the GOP path the
+  lever is a control write per requested picture, so a request on every
+  frame costs more than a plain intra-only stream.
 - **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
   break the one-in-one-out model. A context whose sequence parameters ask for
   `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.

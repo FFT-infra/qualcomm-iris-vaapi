@@ -314,13 +314,14 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding 
   extracts `avcC`/`hvcC` from the first packet; GStreamer's VA encoder
   refuses to start at all, which is the price of not advertising. Anything
   that does need packed headers is a separate change with its own evidence.
-- The running SM8550 module (kernel branch 7.2.6) exposes no
+- A stock SM8550 module (kernel branch 7.2.6 without the patches) exposes no
   `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`v4l2-ctl -d <encoder>
   --list-ctrls` shows the GOP size and the QP controls, no key-frame
   request), which is why the intra period is the fallback lever above.
   `packaging/kernel/0003-*` carries the upstream `REQUEST_SYNC_FRAME` commit
-  rebased onto that branch; a module built with it exposes the control and
-  the session uses it instead of the GOP move. Which one is in force is
+  rebased onto that branch. The target runs a module with it, so the
+  control is listed and the session uses it instead of the GOP move. Which
+  one is in force is
   visible in the trace: `encode idr lever=sync-frame|intra-period`.
 - Deblocking is a slice header property in VA and a per-context control in
   V4L2, so `configure_deblocking` reads the first slice and writes
