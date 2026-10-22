@@ -56,21 +56,36 @@ Iris tree expect fuzz, and check these by hand before building:
 
 ```sh
 cp /boot/config-$(uname -r) .config
+# The release string must match the running kernel exactly or the module
+# will not load. The config's CONFIG_LOCALVERSION is empty and
+# LOCALVERSION_AUTO is off, so the "-sm8550-g42f3b40-iris1" part of the
+# running release is in neither the config nor git: put it in a
+# `localversion` file in the source root instead.
+cat /boot/config-$(uname -r) | grep -E '^CONFIG_LOCALVERSION'
+uname -r                                    # e.g. 7.2.6-sm8550-g42f3b40-iris1
+echo '-sm8550-g42f3b40-iris1' > localversion
 export LOCALVERSION=""                      # keep the "+" off the release string
-make ARCH=arm64 LLVM=1 olddefconfig modules_prepare
+make ARCH=arm64 LLVM=1 LOCALVERSION= olddefconfig modules_prepare
+cat include/config/kernel.release           # must equal uname -r
 # Module.symvers is not shipped; derive the dependency symbols from the
 # running kernel so modpost records "depends:" correctly.
 awk '$4 ~ /^\[/ && $2 ~ /[TDR]/ {gsub(/[\[\]]/,"",$4); print "0x00000000\t"$3"\t"$4"\tEXPORT_SYMBOL\t"}' /proc/kallsyms \
   | grep -E 'videobuf2|videodev|v4l2_mem2mem' > Module.symvers
-make ARCH=arm64 LLVM=1 KBUILD_MODPOST_WARN=1 \
-     KCFLAGS=-mbranch-protection=pac-ret+bti \
+make ARCH=arm64 LLVM=1 LOCALVERSION= KBUILD_MODPOST_WARN=1 \
      M=drivers/media/platform/qcom/iris modules
-llvm-readelf -n drivers/media/platform/qcom/iris/qcom-iris.ko | grep -q 'BTI, PAC'
+llvm-readelf -n drivers/media/platform/qcom/iris/qcom-iris.ko | grep -E 'PAC|BTI'
+modinfo drivers/media/platform/qcom/iris/qcom-iris.ko | grep -E 'vermagic|^depends'
 ```
 
-`KCFLAGS=-mbranch-protection=pac-ret+bti` is required: the kernel is built
-with `CONFIG_ARM64_BTI_KERNEL`, but Kconfig drops that option under
-clang ≥ 21, and a module without BTI landing pads oopses on load.
+`KCFLAGS=-mbranch-protection=pac-ret+bti` is required only when the target's
+config sets `CONFIG_ARM64_BTI_KERNEL`, which Kconfig drops under clang ≥ 21
+and whose absence oopses on load (`Oops - BTI`). The packaged
+`kernel-sheng-7.2.6-1` does not: it sets `CONFIG_ARM64_BTI` without the
+kernel option, and its module's note is `aarch64 feature: PAC`. Match the
+stock module: build with the plain command above, then compare its
+`llvm-readelf -n` note with the stock `.ko`'s before installing anything.
+Adding the KCFLAGS there would give the module BTI landing pads the running
+kernel's own code does not have.
 
 Install by replacing the file and rebooting. Do not `modprobe -r qcom_iris`
 on a booted system: unloading hangs in `iris_vpu_power_off` while the VPU
@@ -82,6 +97,7 @@ sudo cp qcom-iris.ko.zst /lib/modules/$(uname -r)/kernel/drivers/media/platform/
 sudo depmod -a && sudo systemctl reboot
 v4l2-ctl -d /dev/videoN --list-ctrls | grep display_delay   # present = decode-order
 v4l2-ctl -d /dev/videoN --list-ctrls | grep loop_filter     # present = deblocking forwarded
+v4l2-ctl -d /dev/videoN --list-ctrls | grep force_key_frame # present = direct IDR request
 ```
 
 Keep the stock `qcom-iris.ko.zst` beside it for rollback.
