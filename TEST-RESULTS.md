@@ -2473,3 +2473,70 @@ reports `wrong status 38 (surface sync timeout)`.
 The patch has **not been built or loaded on the target**. This record shows
 the failure mode it fixes, not the fixed behavior on hardware; that needs a
 module rebuild from all four patches and the truncation clip above.
+
+## Error-completion timestamps on the target (2026-10-22)
+
+The record above ("Corrupt HEVC: the firmware's error buffer names nothing")
+is the failure it fixes. This run closes it on hardware.
+
+### Build and install
+
+- Source `8dd655e` plus the test fix that follows it, kernel tree
+  `42f3b40c702a` with all four patches applied (`git apply`, no fuzz).
+- Built on the host against the target's `/boot/config-7.2.6-sm8550-g42f3b40`,
+  `localversion` = `-sm8550-g42f3b40-iris1`, `Module.symvers` derived from
+  `/proc/kallsyms`, `HOSTCC=gcc HOSTLD=ld`, no `KCFLAGS`.
+- `qcom-iris.ko` 8 896 688 bytes, SHA-256
+  `02723c5cd09f948a1f5b7888b3f4f821a06d2d194b49a23419a450f1daea79c3`;
+  compressed `qcom-iris.ko.zst` SHA-256
+  `9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d`;
+  vermagic `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64`,
+  note `aarch64 feature: PAC` (same as the stock module).
+- Installed with `~/Lab/kernel-iris-syncframe/install.sh`; the previous
+  module (0001–0003, `802c40c0…`) is kept as `qcom-iris.0003.ko.zst`.
+- Boot ID `40916c73-1560-484d-bd2e-82fed9bab285`. Decoder `/dev/video0`,
+  encoder `/dev/video1` at this boot.
+- All four patches are live: the decoder lists two `display_delay`
+  controls, the encoder lists the six loop-filter controls and
+  `force_key_frame`, and a 20-frame H.264 encode prints
+  `encode idr lever=sync-frame`.
+
+### The clip
+
+`trunc.hevc`: `sintel-1080p30-hevc-b3.mp4` converted to Annex-B and cut
+mid-NAL at the 100th picture (7 761 287 bytes). `midcorrupt.hevc`: the same
+cut followed by the stream resumed at the 13th CRA (17 748 348 bytes), so
+valid pictures follow the corrupt one.
+
+### Before and after, same clip
+
+| Driver / module | `trunc.hevc` | `midcorrupt.hevc` |
+| --- | --- | --- |
+| 0001–0003 module, driver `97ebadd` | `capture error index=4` (no token), then `drain lost token=179`; the surface waited for the drain | not run |
+| four-patch module, driver `8dd655e` | `capture token=179 … flags=0x4049 publish=error`; `errors=1` | `capture token=179 … flags=0x4049 publish=error` at `t=592`, `submit token=180` immediately after, `errors=1`, `completed=495` |
+
+The timestamp the kernel now keeps is what lets the session match the
+completion to its target: the failed surface is marked at dequeue instead
+of at the end-of-stream drain, and decoding continues with the pictures
+after it.
+
+### Regression sweep
+
+- `meson test -C build` on the target: 18/18.
+- Decode matrix: H.264, VP9, HEVC and AV1 all `PASS content=frame-md5`,
+  `timeouts=0 drops=0`; AV1 `submitted=50 capture=50 noshow=23`, which is
+  the hidden-picture path the new branch restructures.
+- The mid-stream run above submits and completes 495 of 496 pictures.
+
+### A test bug found on the way
+
+`test/encode-params-test.cc` passed `h264_sequence()` as a temporary into
+`h264_input()`, which stores a pointer. The host happened to read zeros
+from the dead object; the tablet read `bit_depth_luma_minus8 = 2` left by
+the previous case and aborted on "10-bit encode is not supported". The
+sequence and picture buffers are now locals in every affected case.
+
+### Rollback
+
+`rollback.sh` restores the stock module; `cp qcom-iris.0003.ko.zst` over
+the installed file restores the previous patched module. Both need a reboot.

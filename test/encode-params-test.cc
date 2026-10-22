@@ -169,7 +169,8 @@ void test_h264_rounding_and_rejections()
     auto cqp = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cqp);
     VAEncPictureParameterBufferH264 no_qp = h264_picture();
     no_qp.pic_init_qp = 0;
-    check(throws([&] { cqp->translate(h264_input(h264_sequence(), no_qp)); }),
+    VAEncSequenceParameterBufferH264 sequence_ok = h264_sequence();
+    check(throws([&] { cqp->translate(h264_input(sequence_ok, no_qp)); }),
         "CQP without a picture QP is rejected");
 }
 
@@ -255,10 +256,15 @@ void test_keyframe_request()
 {
     auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
     VAEncPictureParameterBufferH264 h264_params = h264_picture();
-    check(!h264->translate(h264_input(h264_sequence(), h264_params)).keyframe,
+    // The sequence buffer outlives the EncodePicture: h264_input() stores a
+    // pointer, so a temporary here would leave translate() reading a dead
+    // object. It happened to read zeros on one host and stale bytes on
+    // another.
+    VAEncSequenceParameterBufferH264 h264_seq = h264_sequence();
+    check(!h264->translate(h264_input(h264_seq, h264_params)).keyframe,
         "an H.264 picture without idr_pic_flag is not a keyframe request");
     h264_params.pic_fields.bits.idr_pic_flag = 1;
-    check(h264->translate(h264_input(h264_sequence(), h264_params)).keyframe,
+    check(h264->translate(h264_input(h264_seq, h264_params)).keyframe,
         "idr_pic_flag is a keyframe request");
 
     auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
@@ -285,11 +291,15 @@ void test_deblocking()
 {
     auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
     VAEncSliceParameterBufferH264 slice = {};
-    EncodePicture input = h264_input(h264_sequence(), h264_picture());
+    // The sequence and picture buffers must outlive the EncodePicture, which
+    // only holds pointers to them.
+    VAEncSequenceParameterBufferH264 h264_seq = h264_sequence();
+    VAEncPictureParameterBufferH264 h264_pic = h264_picture();
+    EncodePicture input = h264_input(h264_seq, h264_pic);
     input.slices = { &slice };
 
     // A picture with no slice parameters keeps the default: filtering on.
-    EncodePicture bare = h264_input(h264_sequence(), h264_picture());
+    EncodePicture bare = h264_input(h264_seq, h264_pic);
     const iris::EncodeParams plain = h264->translate(bare);
     check(plain.deblock_mode == 0 && plain.deblock_alpha == 0 && plain.deblock_beta == 0,
         "no slice means the default deblocking");
