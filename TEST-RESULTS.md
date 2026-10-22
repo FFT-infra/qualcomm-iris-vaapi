@@ -2859,3 +2859,48 @@ was recorded earlier.
 
 Artifact: `/tmp/iris-bench/vp9-va.md` on the target (per-vector marks), plus
 `vp9res-va.md5` / `vp9res-sw.md5` for the resize vector above.
+
+## Chrome's decode path, measured inside the browser (2026-10-23)
+
+The Import policy was qualified with a probe and the browser runs counted
+frames; neither said which publish policy a browser decode actually took.
+This run answers that from the driver's own trace. Source commit `821c9f2`,
+build `build-def`, driver sha256 `33fff189…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `90008d1c-4049…` (the target rebooted
+since the previous section), Chrome 152.0.7977.82, 20 s window per clip,
+`IRIS_ACCEPTANCE_ENV="V4L2_VA_TRACE=1"`.
+
+| Clip | Per-capture policy | Frames | Dropped |
+| --- | --- | ---: | ---: |
+| H.264 High 1080p, B=3 | `publish=import` ×678 | 481 | 0 |
+| HEVC Main 1080p | `publish=import` ×676 | 481 | 2 |
+| HEVC Main10 1080p | `publish=import` ×678 | 480 | 0 |
+| VP9 P0 1080p | `publish=copy-gpu` ×671 | 481 | 0 |
+| AV1 Main 1080p | `publish=copy-gpu` ×853, `publish=drop` ×13 | 593 | 0 |
+
+What this settles:
+
+- **Chrome does not import its own buffers.** Every surface is created with
+  `imported=0 fd=-1` (22 of them), and the driver exports each stable buffer
+  once (`persistent=1`) for `vaExportSurfaceHandle`. The import decision is
+  therefore made by this driver about its own memory, not by a client
+  handing over a DMA-BUF. That is the same arrangement §3.3 describes as
+  Chrome pre-exporting its pool, now confirmed from the browser rather than
+  from the FFmpeg path.
+- **H.264, HEVC and HEVC 10-bit are zero-copy in Chrome.** Every capture is
+  attributed to an imported buffer, the CAPTURE queue carries a DMABUF fd
+  (`import token=1 index=0 fd=94 …`), and no copy operation appears in the
+  trace.
+- **VP9 and AV1 are not**, exactly as the capability table says: VP9 by the
+  alt-ref 1:2 rule, AV1 by the hidden-picture rule.
+- The 13 AV1 drops are the hidden pictures, one per alt-ref interval
+  (tokens 61, 123, 185, 247, flags `0x4011`), not errors. The session
+  attributes them by decode order and publishes no pixels for them.
+
+One number is not clean: the HEVC 8-bit window dropped 2 frames where the
+same clip measured 0 earlier. The build and the boot both changed, so this
+is recorded as observed rather than attributed.
+
+Artifacts: `/tmp/iris-bench/lab-import/{h264,sintel-1080p30-hevc-b3,
+sintel-1080p30-hevc10,sintel-1080p30-vp9,hw-av1}/` on the target
+(`browser.log`, `cdp.json`, `summary.json`).
