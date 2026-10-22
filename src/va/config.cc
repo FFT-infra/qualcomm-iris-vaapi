@@ -62,7 +62,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         case VAConfigAttribRTFormat:
             if (decode) {
                 attributes[i].value = VA_RT_FORMAT_YUV420;
-                if ((profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2) && d.capabilities.p010)
+                if (p010_decode_profile(profile) && d.capabilities.p010)
                     attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             } else if (encode) {
                 // The encoder's raw port is NV12; P010 is not an option.
@@ -121,8 +121,7 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         }
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
-        if (entrypoint == VAEntrypointVLD && d.capabilities.p010
-            && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
+        if (entrypoint == VAEntrypointVLD && d.capabilities.p010 && p010_decode_profile(profile))
             rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
         for (int i = 0; i < count; ++i) {

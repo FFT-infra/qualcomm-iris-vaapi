@@ -54,6 +54,14 @@ block = driver[driver.index("import-qualified-begin"):driver.index("import-quali
 names = {name.upper() for name in re.findall(r"V4L2_PIX_FMT_([A-Za-z0-9_]+)", block)}
 want = {codec.upper() for codec, item in entries.items() if item["publish_import"] == "qualified"}
 assert names == want, (names, want)
+# A codec decodes into P010 exactly when one of its profiles is in the
+# driver's 10-bit set. AV1 carries both depths inside Profile 0, so the set
+# is not derivable from the profile name alone.
+p010 = driver[driver.index("bool p010_decode_profile"):driver.index("iris::Publish publish_policy")]
+p010_profiles = set(re.findall(r"VAProfile([A-Za-z0-9_]+)", p010))
+for codec, item in entries.items():
+    has_p010 = "P010" in item["capture_formats"]
+    assert has_p010 == bool(set(item["va_profiles"]) & p010_profiles), (codec, has_p010, p010_profiles)
 # Same rule for the encode entrypoint: the advertised profiles and capture
 # formats are exactly the qualified ones in this document.
 block = driver[driver.index("encode-qualified-begin"):driver.index("encode-qualified-end")]

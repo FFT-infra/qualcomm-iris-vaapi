@@ -2714,3 +2714,112 @@ finding; it was not tested.
   shows the two drivers agree where both decode; the AV1 row shows only
   that piano has no AV1 entrypoint on this node, not how an AV1
   implementation of its own would compare.
+
+## AV1 Profile 0 at 10-bit, and the browser matrix beside piano (2026-10-22)
+
+Source `72873c8` plus the working-tree change that adds
+`p010_decode_profile()`, driver build tree only
+(`build-def/src/v4l2_drv_video.so`, sha256
+`00e60b69eafa2e80…` after the change, `f3b37e6ad91b…` before it), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`40916c73-1560-484d-bd2e-82fed9bab285`, decoder `/dev/video0`, encoder
+`/dev/video1`. Chrome 152.0.7977.82. Neither driver is installed; each row
+selects its bytes with `LIBVA_DRIVERS_PATH`.
+
+### Why AV1 10-bit was missing
+
+The capability table said "10-bit and 12-bit (only AV1Profile0 is
+advertised)". That was not a hardware limit. The firmware decodes 10-bit
+AV1 on its own: a GStreamer `v4l2av1dec` run of the same clip negotiated
+`P010_10LE` and wrote 23 frames of 640x360 P010, with no `unsupported
+content` in dmesg. The kernel's 8-bit subscribe-params check
+(`iris_hfi_gen2_response.c`, `sub_depth != BIT_DEPTH_8`) does not fire,
+because `iris_hfi_gen2_set_bit_depth()` always sends `BIT_DEPTH_8` and the
+firmware derives the depth from the stream.
+
+The driver was the blocker, twice over:
+
+- `getConfigAttributes` offered `VA_RT_FORMAT_YUV420_10` only for
+  `HEVCMain10` and `VP9Profile2`. A client asks for 10-bit AV1 surfaces
+  through that attribute, so no client could create them.
+- `querySurfaceAttributes` listed `P010` under the same two profiles only.
+  FFmpeg picks its surface format from that list and logged
+  `Picked nv12 as best match for yuv420p10le`.
+
+With either one missing the failure is the same and looks like a firmware
+fault: `capture format rejected wanted=NV12 granted=P010`, then
+`decoder CAPTURE layout unsupported` at `endPicture`. The firmware had
+already chosen P010 from the bitstream and refuses NV12 afterwards, so
+the session cannot recover — the depth has to be right before the first
+access unit.
+
+### The change
+
+One predicate, `p010_decode_profile()`, now answers "does this profile
+decode into P010" for the config attributes, the surface attributes and
+the capability table. `AV1Profile0` is in it. `test/iris-codec-matrix-check.sh`
+asserts that the table's `capture_formats` and that predicate agree in
+both directions, so the next profile cannot drift from the document.
+
+### Frame MD5, 10-bit AV1
+
+`av1-640x360-10bit.mp4` (libsvtav1, 30 frames, `profile=Main`,
+`pix_fmt=yuv420p10le`), `hwdownload,format=p010le` against libdav1d:
+
+| Path | Frames | MD5 equal |
+| --- | --- | --- |
+| This driver, VA-API, P010 | 30 | 30/30 |
+
+### Browser acceptance, this driver versus piano
+
+Same harness (`test/iris-browser-acceptance.sh`), same clips, 20 s window,
+build-tree driver on both sides. piano is `radxa-pkg/libva-v4l2` 1.0.0
+built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`).
+
+| Clip | This driver | piano |
+| --- | --- | --- |
+| H.264 High 1080p, B-frames | `VaapiVideoDecoder`, platform, 482 frames, 0 dropped | same, 481 frames, 0 dropped |
+| HEVC Main 1080p | `VaapiVideoDecoder`, platform, 483 frames, 0 dropped | same, 482 frames, 0 dropped |
+| HEVC Main10 1080p | `VaapiVideoDecoder`, platform, 482 frames, 0 dropped | video element error 4, no decoder, node never opened |
+| VP9 Profile 0 1080p | `VaapiVideoDecoder`, platform, 483 frames, 0 dropped | same, 482 frames, 0 dropped |
+| AV1 Main 1080p | `VaapiVideoDecoder`, platform, 599 frames, 0 dropped | `Dav1dVideoDecoder`, not platform, node never opened |
+| AV1 Main 10-bit 640x360 | `VaapiVideoDecoder`, platform, 593 frames, 0 dropped | `Dav1dVideoDecoder`, not platform, node never opened |
+
+Every row that passed also shows a Chrome GPU process holding the resolved
+Iris node (`--type=gpu-process` in `iris-node-holders.txt`), and a boot ID
+unchanged across the run. The AV1 rows on piano fall back to software
+because piano's `vainfo` lists no `VAProfileAV1Profile0`; the HEVC Main10
+row is a harder failure, the element itself errors and nothing is decoded.
+Both were re-run once to confirm.
+
+### What this does not show
+
+The 10-bit AV1 clip is 640x360 and 30 frames. It proves the depth
+plumbing, not throughput; a 1080p 10-bit AV1 run is not in this record.
+Chrome's P010 surfaces were confirmed from the driver trace
+(`fourcc=P010` for every `va create_surfaces` on that row), not from a
+pixel comparison against software output, which Chrome does not expose.
+
+### Film grain stays refused, and it is a kernel limit
+
+A 1280x720 60-frame AV1 stream encoded with `-aom-params film-grain-test=8`
+is still rejected at `endPicture` (`film grain parameters are not
+reconstructed`). The refusal is correct: `FILM_GRAIN` is a
+`CAP_FLAG_VOLATILE` capability, its value comes from the firmware's
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` reply, and `v4l2-ctl -l` on the decoder
+lists no film-grain control at all — nothing in the V4L2 surface lets
+userspace turn it on. Passing the parameters through would advertise a
+picture the firmware will not produce. The firmware-path probe agrees in
+the weakest possible way: GStreamer's `v4l2av1dec` on the same stream
+wrote 44 frames out of 60 and no dmesg line, so the firmware drops
+pictures on that stream rather than synthesising grain.
+
+### Artifacts
+
+On the target: `~/iris-vaapi-lab/artifacts/browser-acceptance/` (one
+directory per row above, each with `summary.json`, `cdp.json`,
+`browser.log` and `iris-node-holders.txt`),
+`/tmp/iris-bench/lab*/artifacts/browser-acceptance/` for the rows that
+were run under a scratch lab root, `/tmp/iris-bench/av110-va.md5` and
+`av110-sw.md5` for the frame MD5s, and
+`~/iris-vaapi-lab/media/10bit/av1-640x360-10bit.mp4` for the clip.

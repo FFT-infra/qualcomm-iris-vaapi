@@ -545,6 +545,7 @@ ends with a tag. Gates are commands, not opinions.
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
 | 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce; `encode-params` for the translation and the request rejections, `annexb` for what a requested IDR carries; on the target, one-second segments cut at `-force_key_frames` in both codecs and a 24 fps run past every GOP boundary | (in `feat/encode-entrypoints`) |
+| 9 | AV1 Profile 0 qualified at both bit depths: P010 advertised and the capture format taken from the stream | native-vs-VA frame MD5 over a 10-bit stream, Chrome 152 on the same stream selecting `VaapiVideoDecoder` with P010 surfaces, and the 8-bit/HEVC Main10/VP9 rows unchanged; see §9 and `TEST-RESULTS.md` | (not tagged) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
@@ -646,6 +647,13 @@ them).
     must match a pending hidden target. Either way an alt-ref can never land
     on a shown picture's surface, and a corrupt shown picture is never
     published as a hidden one.
+19. A decode profile's surface depth is decided before the first access unit
+    and by the profile, not by the stream. The firmware reads the bit depth
+    from the bitstream itself and then refuses any CAPTURE format but the
+    matching one, so a session opened on NV12 for a 10-bit stream fails at
+    the first picture with nothing to retry. `p010_decode_profile()` is the
+    one place that answers this, and the capability table, the config
+    attributes, the surface attributes and the capture format all read it.
 
 ## 11. How work is divided
 

@@ -154,12 +154,13 @@
         "AV1"
       ],
       "capture_formats": [
-        "NV12"
+        "NV12",
+        "P010"
       ],
       "fallback": "software",
       "rejected": [
         "film grain synthesis",
-        "10-bit and 12-bit (only AV1Profile0 is advertised)",
+        "12-bit",
         "large-scale tile (10-bit only)"
       ],
       "publish_import": "fallback",

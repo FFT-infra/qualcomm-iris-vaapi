@@ -35,7 +35,7 @@ Chrome 152.
 | HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 111/147 (firmware 112) |
 | HEVC Main10 (P010) | hardware decoder | Import, zero-copy | frame MD5 equal at 10-bit |
 | VP9 Profile 0 / 2 | hardware decoder | GPU blit (see limits) | frame MD5 equal, 8- and 10-bit |
-| AV1 Profile 0 | hardware decoder | GPU blit (see limits) | frame MD5 equal, alt-ref and no-alt-ref streams |
+| AV1 Profile 0 | hardware decoder | GPU blit (see limits) | frame MD5 equal, alt-ref, no-alt-ref, 8- and 10-bit |
 
 "Hardware decoder" means Chrome's media surface reports `VaapiVideoDecoder`
 with the platform flag set and a decoded-frame count over a 30 s window with
@@ -175,7 +175,10 @@ is usable as an encode input as well.
   The firmware also returns a hidden (`show_frame=0`) picture without pixels;
   the session attributes it by decode order and publishes it, because
   FFmpeg shows it later through `show_existing_frame`. Import therefore
-  stays on the copy path, and only AV1 Profile 0 (8-bit NV12) is advertised.
+  stays on the copy path. AV1 Profile 0 covers 8- and 10-bit 4:2:0, and both
+  are advertised: the firmware picks P010 or NV12 from the stream, and film
+  grain synthesis is refused because the kernel gives userspace no way to
+  ask the firmware for it.
 - **Stock kernel means Copy for Chrome.** Without the decode-order control
   the session runs in display-order mode: bounded sync waits plus one
   STOP/LAST/START drain on timeout, and Import is refused.

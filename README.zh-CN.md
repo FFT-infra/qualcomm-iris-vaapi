@@ -31,7 +31,7 @@ Firefox 用的是同一个驱动，也都欢迎，只是它们本来就有各自
 | HEVC Main | 硬件解码 | Import，零拷贝 | 逐帧 MD5 一致；Fluster JCT-VC-HEVC_V1 111/147（固件 112） |
 | HEVC Main10（P010） | 硬件解码 | Import，零拷贝 | 10-bit 逐帧 MD5 一致 |
 | VP9 Profile 0 / 2 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，8-bit 和 10-bit |
-| AV1 Profile 0 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，alt-ref 与无 alt-ref 流都验证过 |
+| AV1 Profile 0 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，alt-ref、无 alt-ref、8-bit 和 10-bit 都验证过 |
 
 "硬件解码"的标准：Chrome 的 media 面板报告 `VaapiVideoDecoder`、平台解码器
 标志为真、30 秒窗口内有解码帧数且零丢帧。节点被打开、GPU 进程在跑，这些都
@@ -148,8 +148,9 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   时上限到期，压后的图按最后一帧释放，如果后面还有非帧内图，会以一个明确的
   错误失败，而不是解出错像素。固件对隐藏帧（`show_frame=0`）不返回像素，会话
   按解码顺序把它认出来并照常发布，因为 FFmpeg 之后会用 `show_existing_frame`
-  把它显示出来。因此 Import 仍然只走拷贝路径，声明的也只有 AV1 Profile 0
-  （8-bit NV12）。
+  把它显示出来。因此 Import 仍然只走拷贝路径。AV1 Profile 0 同时覆盖 8-bit
+  和 10-bit 4:2:0，两种都声明：P010 还是 NV12 由固件按码流自己决定。film grain
+  合成会被拒绝，因为内核没有给用户态任何途径去要求固件做这件事。
 - **原版内核上 Chrome 走 Copy。** 没有解码顺序控制项时会话运行在显示顺序
   模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空，Import 被拒绝。
 - **导入的 surface 必须符合 CAPTURE 布局。** 客户端 DMA-BUF 只要带 tiling

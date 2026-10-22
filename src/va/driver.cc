@@ -59,6 +59,16 @@ std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface)
     return it == d.contexts.end() ? nullptr : it->second;
 }
 
+bool p010_decode_profile(VAProfile profile)
+{
+    // AV1 signals 8- and 10-bit inside Profile 0, so the format follows the
+    // stream, not the profile. The firmware picks P010 from the bitstream
+    // itself (iris_hfi_gen2_set_bit_depth always sends BIT_DEPTH_8) and
+    // refuses to grant NV12 afterwards, so the surfaces have to be P010
+    // before the first access unit.
+    return profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2 || profile == VAProfileAV1Profile0;
+}
+
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session)
 {
     switch (d.options.publish) {

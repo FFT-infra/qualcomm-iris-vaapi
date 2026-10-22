@@ -205,6 +205,12 @@ std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
 // gone. The caller holds nothing; `translate_mutex` is taken here.
 bool release_held_picture(DriverData& d, Context& context);
 
+// Whether this profile decodes into 10-bit P010 as well as 8-bit NV12. AV1
+// carries both depths under Profile 0; H.264 is 8-bit only here. The three
+// places that advertise or accept a capture format (config attributes,
+// surface attributes, context creation) all ask this one function.
+bool p010_decode_profile(VAProfile profile);
+
 // Publish policy for the next picture on this surface through `session`.
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session);
 // Allocate the surface's stable buffer if it has none.
