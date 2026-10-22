@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// One Iris stateful encode session per VA context. Unlike the decoder, this
-// transaction is synchronous: one raw frame in, one access unit out, no slot
-// pool and no publish policy. The firmware owns GOP placement and the
-// sequence headers.
+// One Iris stateful encode session per VA context. A picture is submitted and
+// completed as two steps: submit() queues the raw frame, wait() takes the
+// access unit. The client sees the same split: vaEndPicture submits and
+// vaSyncBuffer waits. A client that never asks to wait (vaMapBuffer on the
+// coded buffer is the one FFmpeg calls) gets the wait inside the map.
+// The firmware owns GOP placement and the sequence headers.
 
 #pragma once
 
@@ -16,9 +18,11 @@
 #include "../util/trace.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -36,6 +40,13 @@ struct EncodeConfig {
 
 struct EncodeResult {
     std::vector<uint8_t> bytes;
+};
+
+// One submitted picture: the handle a completion is claimed with. The
+// timestamp is the token the firmware echoes, and it is unique per session
+// because the session advances it by one frame duration per picture.
+struct EncodeTicket {
+    uint64_t timestamp_us = 0;
 };
 
 class EncoderSession {
@@ -56,21 +67,41 @@ public:
     // `width`/`height` are the input surface's, which may be smaller than
     // the context the client declared.
     void configure(const EncodeParams& params, unsigned width, unsigned height, PrepareAccessUnit prepare = {});
-    // Queue `dmabuf_fd` as one raw frame, wait for its access unit, and
-    // return the completion. Safe to call from one thread; the session
-    // mutex serialises a stray second caller. The V4L2 timestamp advances by
-    // one frame duration of the session rate on every picture: the firmware
-    // echoes it, and it stops producing access units if the sequence ever
-    // goes backwards.
+    // Queue `dmabuf_fd` as one raw frame and return its ticket without
+    // waiting. The caller keeps the DMA-BUF alive until the matching wait():
+    // the firmware reads it until it completes the picture. The V4L2
+    // timestamp advances by one frame duration of the session rate on every
+    // picture: the firmware echoes it, and it stops producing access units
+    // if the sequence ever goes backwards. A submitted picture is never
+    // dropped; submit() blocks only when every input slot is still in use.
+    EncodeTicket submit(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params);
+    // Take the access unit for `ticket`. Completions arrive in submission
+    // order, so an earlier ticket is resolved on the way. Safe to call from
+    // any thread, and safe for two threads to wait on two different tickets.
+    EncodeResult wait(EncodeTicket ticket);
+    // The same, bounded by the client's vaSyncBuffer timeout. A timeout of
+    // zero returns at once when the picture is not ready; the ticket stays
+    // valid, so the client can ask again.
+    EncodeResult wait_timeout(EncodeTicket ticket, uint64_t timeout_ns);
+    // submit() then wait(): the synchronous shape, kept for the unit tests
+    // and for a client that wants one picture at a time.
     EncodeResult encode(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params);
     // STOP, drain the tail, STREAMOFF, REQBUFS(0). Idempotent.
     void finish();
+    // False once a completion failed. The failure is reported to every
+    // outstanding ticket, so a client waiting on a later picture sees it.
+    bool healthy() const { return healthy_; }
 
 private:
     struct CaptureSlot {
         unsigned index = 0;
         unsigned length = 0;
         uint8_t* mapping = nullptr;
+    };
+    struct Pending {
+        EncodeTicket ticket;
+        EncodeParams params;
+        bool force_idr = false;
     };
 
     using Clock = std::chrono::steady_clock;
@@ -79,10 +110,17 @@ private:
     void set_control(uint32_t id, int32_t value, const char* name);
     void set_frame_qp(int qp);
     void configure_deblocking(const EncodeParams& params);
-    void reclaim_output(Clock::time_point deadline);
-    std::optional<Dequeued> wait_capture(Clock::time_point deadline);
+    void take_output_slot(Clock::time_point limit);
+    std::optional<Dequeued> wait_capture(Clock::time_point limit);
+    // Move the oldest queued completion into `completed_`. Returns false when
+    // the firmware produced nothing.
+    bool complete_one();
+    bool ticket_known(EncodeTicket ticket) const;
+    void claim(EncodeTicket ticket);
+    bool claimed(EncodeTicket ticket) const;
     int sync_timeout_ms() const;
     Clock::time_point deadline() const;
+    Clock::time_point wait_deadline(uint64_t timeout_ns) const;
 
     std::unique_ptr<Device> device_;
     EncodeConfig config_;
@@ -92,10 +130,23 @@ private:
     bool configured_ = false;
     bool finished_ = false;
     bool cold_ = true;
+    bool healthy_ = true;
+    // The firmware answered the drain marker (V4L2_ENC_CMD_STOP).
+    bool drained_ = false;
     EncodeParams applied_;
 
     std::vector<CaptureSlot> capture_;
     std::deque<unsigned> free_output_;
+    // Submitted pictures whose access unit has not arrived, oldest first.
+    std::deque<Pending> pending_;
+    // Pictures the firmware has finished, waiting for their ticket holder.
+    std::map<uint64_t, EncodeResult> completed_;
+    // The newest ticket issued, and the newest one already claimed. A ticket
+    // at or below `claimed_us_` was answered once; asking again (a client
+    // that syncs both the surface and the coded buffer) succeeds rather than
+    // reporting a ticket that no longer exists.
+    uint64_t issued_us_ = 0;
+    uint64_t claimed_us_ = 0;
     unsigned frames_ = 0;
     // Session frame rate, fixed in configure(), and the timestamp of the
     // last submitted picture.
@@ -106,9 +157,12 @@ private:
     // firmware wrote without them.
     std::vector<codec::NalUnit> parameter_sets_;
     PrepareAccessUnit prepare_;
-    // One transaction at a time; also keeps finish() from tearing the queues
-    // down under an encode that is still waiting for a completion.
+    // Guards the queues, the slot lists and finish(). It is never held while
+    // the firmware is waited on: wait() releases it across poll(), so a
+    // second thread can submit while the first is blocked.
     std::mutex mutex_;
+    // Wakes every waiter when a completion lands or the session finishes.
+    std::condition_variable ready_;
 };
 
 } // namespace iris

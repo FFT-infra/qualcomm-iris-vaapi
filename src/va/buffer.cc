@@ -72,32 +72,56 @@ VAStatus destroyBuffer(VADriverContextP ctx, VABufferID id)
 VAStatus mapBuffer(VADriverContextP ctx, VABufferID id, void** mapped)
 {
     auto& d = data(ctx);
+    std::shared_ptr<Buffer> b;
+    std::optional<iris::EncodeTicket> ticket;
+    std::shared_ptr<iris::EncoderSession> session;
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        b = buffer(d, id);
+        // A coded buffer whose picture has not been claimed yet. The client
+        // either called vaSyncBuffer already (then this is empty) or is
+        // using the older contract where reading the buffer implies waiting.
+        if (b->type == VAEncCodedBufferType && b->ticket) {
+            ticket = b->ticket;
+            session = b->coded_session;
+        }
+    }
+    if (ticket) {
+        iris::require(bool(session), "coded buffer lost its encode session", VA_STATUS_ERROR_INVALID_CONTEXT);
+        const iris::EncodeResult result = session->wait(*ticket);
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        iris::require(result.bytes.size() <= b->size, "coded buffer is too small", VA_STATUS_ERROR_ENCODING_ERROR);
+        b->payload = result.bytes;
+        b->ticket.reset();
+        b->coded_session.reset();
+    }
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     auto it = d.buffers.find(id);
     if (it == d.buffers.end())
         return VA_STATUS_ERROR_INVALID_BUFFER;
-    auto& b = *it->second;
-    if (b.type == VAEncCodedBufferType) {
+    auto& mapped_buffer = *it->second;
+    if (mapped_buffer.type == VAEncCodedBufferType) {
         // vaMapBuffer on a coded buffer returns a linked list of
         // VACodedBufferSegment, terminated by next == NULL. One segment is
         // the whole access unit.
-        b.segment.size = static_cast<uint32_t>(b.payload.size());
-        b.segment.bit_offset = 0;
-        b.segment.status = 0;
-        b.segment.reserved = 0;
-        b.segment.buf = b.payload.empty() ? nullptr : b.payload.data();
-        b.segment.next = nullptr;
-        *mapped = &b.segment;
+        mapped_buffer.segment.size = static_cast<uint32_t>(mapped_buffer.payload.size());
+        mapped_buffer.segment.bit_offset = 0;
+        mapped_buffer.segment.status = 0;
+        mapped_buffer.segment.reserved = 0;
+        mapped_buffer.segment.buf = mapped_buffer.payload.empty() ? nullptr : mapped_buffer.payload.data();
+        mapped_buffer.segment.next = nullptr;
+        *mapped = &mapped_buffer.segment;
         return VA_STATUS_SUCCESS;
     }
     // A derived image is a view over the surface's DMA-BUF, not a copy.
-    if (b.alias) {
-        if (b.alias_fd >= 0)
-            iris::dma_buf_cpu_sync(b.alias_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE);
-        *mapped = b.alias;
+    if (mapped_buffer.alias) {
+        if (mapped_buffer.alias_fd >= 0)
+            iris::dma_buf_cpu_sync(
+                mapped_buffer.alias_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE);
+        *mapped = mapped_buffer.alias;
         return VA_STATUS_SUCCESS;
     }
-    *mapped = b.data.data();
+    *mapped = mapped_buffer.data.data();
     return VA_STATUS_SUCCESS;
 }
 

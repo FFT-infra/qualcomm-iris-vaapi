@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -94,6 +95,13 @@ struct Buffer {
     // segment list vaMapBuffer hands back.
     std::vector<uint8_t> payload;
     VACodedBufferSegment segment = {};
+    // An encode picture's coded buffer is filled by the firmware, not by
+    // vaEndPicture: the picture is submitted there and this ticket is what
+    // vaSyncBuffer (or, for a client that never calls it, vaMapBuffer)
+    // claims. `coded_session` keeps the session alive so a sync arriving
+    // after vaDestroyContext still finds the completion.
+    std::optional<iris::EncodeTicket> ticket;
+    std::shared_ptr<iris::EncoderSession> coded_session;
 };
 
 struct Context {
@@ -128,6 +136,15 @@ struct Context {
     // table; the parameters still describe the stream.
     std::shared_ptr<Buffer> enc_sequence;
     uint64_t enc_frames = 0;
+    // The picture most recently submitted from each input surface. A client
+    // that syncs the surface instead of the coded buffer (VA's older
+    // contract, and what FFmpeg uses when vaSyncBuffer is missing) waits
+    // here.
+    struct EncSubmitted {
+        iris::EncodeTicket ticket;
+        std::shared_ptr<iris::EncoderSession> session;
+    };
+    std::map<VASurfaceID, EncSubmitted> enc_submitted;
 
     bool encoding() const { return entrypoint == VAEntrypointEncSlice; }
 };
@@ -216,6 +233,10 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
 VAStatus createSurfaces(VADriverContextP ctx, int width, int height, int format, int count, VASurfaceID* ids);
 VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count);
 VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id);
+// A coded buffer's completion. Its presence is what tells FFmpeg it may
+// pipeline pictures: vaapi_encode.c enables async_encode when this call
+// does not answer VA_STATUS_ERROR_UNIMPLEMENTED.
+VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns);
 VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatus* status);
 VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count);
 VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_type, uint32_t flags, void* descriptor);

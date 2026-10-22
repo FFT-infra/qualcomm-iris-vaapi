@@ -195,10 +195,13 @@ is usable as an encode input as well.
   tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
   packaging is provided but not validated.
 - **On-demand IDR works by moving the GOP, not by a keyframe control.** The
-  node exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` and the firmware
-  capability list has no RAP control, so a requested IDR is produced by
+  kernel branch the target runs (7.2.6) exposes no
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so a requested IDR is produced by
   setting the intra period to zero for that one picture and putting it back
-  before the picture is queued. `-force_key_frames` with a stream copy or a
+  before the picture is queued. The firmware does have the property: newer
+  trees (7.3-rc4) list `REQUEST_SYNC_FRAME` in the SM8550 encoder capability
+  table and wire it to that control, so a kernel carrying it would make the
+  lever unnecessary. `-force_key_frames` with a stream copy or a
   segment muxer therefore cuts where it asks; the next automatic IDR is one
   GOP after the requested one, not after the original schedule. The
   intra-period change is a control write per requested picture, so a request
@@ -216,9 +219,15 @@ is usable as an encode input as well.
   extradata for H.264, 124 for HEVC). GStreamer's VA encoder is stricter and
   refuses a driver that advertises no packed headers at all, so `vah264enc`
   and `vah265enc` do not work; FFmpeg's `h264_vaapi`/`hevc_vaapi` do.
-- **One picture per context at a time.** `vaEndPicture` runs the whole V4L2
-  transaction, and a VA context has a fixed geometry: changing resolution
-  needs a new context.
+- **Encode is pipelined, `-async_depth` works.** `vaEndPicture` queues the
+  picture and returns; the access unit arrives through `vaSyncBuffer` on the
+  coded buffer (or through `vaMapBuffer` for a client that never syncs).
+  FFmpeg sees `vaSyncBuffer` and switches to its asynchronous path, so
+  `-async_depth` pipelines up to the four encoder input slots: 1080p HEVC on
+  the target goes from 190 fps at depth 1 to 372 fps at depth 4, with
+  byte-identical output at every depth. `vaSyncSurface` on the input surface
+  still works and means the same picture's completion. A VA context has a
+  fixed geometry: changing resolution needs a new context.
 - **No multi-slice, tiles, ROI or `-max_frame_size`.** FFmpeg fails those
   requests loudly; they are not silently ignored. The driver has the same
   rule: more than one slice in the picture parameters, tiles, wavefront

@@ -426,9 +426,9 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                     VA_STATUS_ERROR_INVALID_PARAMETER);
                 stable = &ensure_stable(d, *s);
             }
-            // Translation and the V4L2 transaction run outside the table
-            // lock: unlike a decode submit, the encode blocks until the
-            // firmware returns the access unit.
+            // Translation and the V4L2 queue run outside the table lock: the
+            // submit blocks only when every input slot is still with the
+            // firmware, and the access unit itself is waited for later.
             const iris::EncodeParams params = c->encoder->translate(c->enc_picture);
             if (!c->encode_session->configured()) {
                 // The codec knows which units travel with its keyframes; the
@@ -445,20 +445,25 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                     "encode surface changed size", VA_STATUS_ERROR_INVALID_SURFACE);
             }
             c->enc_frames++;
-            iris::EncodeResult result = c->encode_session->encode(stable->fd(), stable->size(), params);
-            iris::require(result.bytes.size() <= coded->size, "coded buffer is too small",
-                VA_STATUS_ERROR_ENCODING_ERROR);
+            // The surface's DMA-BUF has to outlive the submit: the firmware
+            // reads it until it completes the picture. `stable` is the
+            // surface's own buffer, which lives until the surface does.
+            const iris::EncodeTicket ticket
+                = c->encode_session->submit(stable->fd(), stable->size(), params);
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
-                coded->payload = std::move(result.bytes);
-                coded->segment.size = static_cast<uint32_t>(coded->payload.size());
+                coded->payload.clear();
+                coded->segment.size = 0;
                 coded->segment.bit_offset = 0;
                 coded->segment.status = 0;
-                coded->segment.buf = coded->payload.empty() ? nullptr : coded->payload.data();
+                coded->segment.buf = nullptr;
                 coded->segment.next = nullptr;
+                coded->ticket = ticket;
+                coded->coded_session = c->encode_session;
+                c->enc_submitted[current] = Context::EncSubmitted { ticket, c->encode_session };
             }
-            d.trace("va end_picture ctx=%u surface=%u entrypoint=encslice bytes=%zu", id, current,
-                coded->payload.size());
+            d.trace("va end_picture ctx=%u surface=%u entrypoint=encslice submitted token=%llu", id, current,
+                static_cast<unsigned long long>(ticket.timestamp_us));
             return VA_STATUS_SUCCESS;
         }
         // The VA buffers referenced by c->picture stay valid until the

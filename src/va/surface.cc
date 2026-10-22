@@ -286,16 +286,77 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
         std::shared_ptr<Surface> s;
         std::shared_ptr<iris::Session> session;
         std::shared_ptr<Context> owner;
+        std::optional<Context::EncSubmitted> encoded;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
             session = session_of(d, *s);
             owner = owner_of(d, *s);
+            // An encode context has no decode session: vaSyncSurface means
+            // "the picture this surface was input to is done", which is the
+            // access unit's completion.
+            if (owner && owner->encoding()) {
+                auto it = owner->enc_submitted.find(id);
+                if (it != owner->enc_submitted.end())
+                    encoded = it->second;
+            }
+        }
+        if (encoded) {
+            if (encoded->session)
+                encoded->session->wait(encoded->ticket);
+            return VA_STATUS_SUCCESS;
         }
         const VAStatus release = wait_for_release(d, s, owner, id);
         if (release != VA_STATUS_SUCCESS)
             return release;
         return wait_for(d, std::move(session), s);
+    });
+}
+
+VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns)
+{
+    return guarded(ctx, "syncBuffer", [&] {
+        auto& d = data(ctx);
+        // FFmpeg's capability probe: vaSyncBuffer(display, VA_INVALID_ID, 0)
+        // only asks whether this entry point exists (vaapi_encode.c). Answer
+        // that, not "invalid buffer", or every FFmpeg encode falls back to
+        // synchronous mode.
+        if (id == VA_INVALID_ID)
+            return VA_STATUS_SUCCESS;
+        std::shared_ptr<Buffer> b;
+        std::optional<iris::EncodeTicket> ticket;
+        std::shared_ptr<iris::EncoderSession> session;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            b = buffer(d, id);
+            // Only a coded buffer has a completion behind it. Anything else
+            // is already settled when vaEndPicture returns, which is what a
+            // success here means.
+            if (b->type != VAEncCodedBufferType)
+                return VA_STATUS_SUCCESS;
+            if (b->ticket) {
+                ticket = b->ticket;
+                session = b->coded_session;
+            }
+        }
+        if (!ticket)
+            return VA_STATUS_SUCCESS;
+        iris::require(bool(session), "coded buffer lost its encode session", VA_STATUS_ERROR_INVALID_CONTEXT);
+        // The bytes are kept by the session until they are claimed, so a
+        // timeout does not lose them: the client asks again and gets the
+        // same access unit.
+        const iris::EncodeResult result = session->wait_timeout(*ticket, timeout_ns);
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        iris::require(result.bytes.size() <= b->size, "coded buffer is too small", VA_STATUS_ERROR_ENCODING_ERROR);
+        b->payload = result.bytes;
+        b->segment.size = static_cast<uint32_t>(b->payload.size());
+        b->segment.bit_offset = 0;
+        b->segment.status = 0;
+        b->segment.buf = b->payload.empty() ? nullptr : b->payload.data();
+        b->segment.next = nullptr;
+        b->ticket.reset();
+        b->coded_session.reset();
+        return VA_STATUS_SUCCESS;
     });
 }
 

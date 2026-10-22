@@ -248,6 +248,7 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
     vtable->vaCreateSurfaces2 = createSurfaces2;
     vtable->vaDestroySurfaces = destroySurfaces;
     vtable->vaSyncSurface = syncSurface;
+    vtable->vaSyncBuffer = syncBuffer;
     vtable->vaQuerySurfaceStatus = querySurfaceStatus;
     vtable->vaQuerySurfaceAttributes = querySurfaceAttributes;
     vtable->vaExportSurfaceHandle = exportSurfaceHandle;

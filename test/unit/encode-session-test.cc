@@ -211,11 +211,36 @@ public:
             timestamps_.push_back(timestamp_us);
             gop_at_queue_.push_back(written_.count(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
                     ? written_.at(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
-                    : INT_MIN);
-            staged_.push_back(iris::Dequeued { 0, 0, 0, kPayload, 0 });
+                    : INT32_MIN);
             returned_.push_back(index);
+            // Withhold completions to model firmware latency: a real node
+            // answers a few pictures late, which is what makes the session's
+            // pipelining visible.
+            if (hold_ == 0) {
+                complete_next();
+            } else {
+                held_outputs_.push_back(timestamp_us);
+                ++withheld_;
+            }
         }
     }
+
+    // Withhold every completion: the firmware latency a pipelining client
+    // hides behind.
+    void hold_completions() { hold_ = 1; }
+    // Answer every picture at once again.
+    void complete_immediately() { hold_ = 0; }
+    // Complete `count` withheld pictures, oldest first.
+    void release(unsigned count = 1)
+    {
+        for (unsigned i = 0; i < count && !held_outputs_.empty(); ++i) {
+            held_outputs_.erase(held_outputs_.begin());
+            complete_next();
+            --withheld_;
+        }
+    }
+    // Pictures whose access unit the firmware has not produced yet.
+    unsigned outstanding() const { return withheld_; }
 
     std::optional<iris::Dequeued> dequeue_buffer(iris::Queue queue) override
     {
@@ -268,6 +293,10 @@ public:
     }
 
 private:
+    void complete_next()
+    {
+        staged_.push_back(iris::Dequeued { 0, 0, 0, kPayload, 0 });
+    }
     std::set<uint32_t> known_;
     std::map<uint32_t, int32_t> written_;
     std::map<uint32_t, unsigned> writes_;
@@ -282,6 +311,10 @@ private:
     unsigned crop_width_ = 0, crop_height_ = 0;
     unsigned output_count_ = 0;
     unsigned frame_rate_num_ = 0, frame_rate_den_ = 0;
+    // Pictures whose access unit is withheld until release().
+    unsigned hold_ = 0;
+    unsigned withheld_ = 0;
+    std::vector<uint64_t> held_outputs_;
 };
 
 std::unique_ptr<iris::EncoderSession> make_session(bool loop_filter_controls, uint32_t codec)
@@ -519,6 +552,78 @@ void test_on_demand_idr()
     session.finish();
 }
 
+// The point of the split: with the firmware holding completions, several
+// pictures are in flight at once and each ticket still gets its own access
+// unit. A synchronous session could not get past the first submit.
+void test_pipelined_pictures()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1, "configure");
+    raw->hold_completions();
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+
+    const iris::EncodeTicket first = session.submit(fd, kCaptureSlot, params(0, 0, 0));
+    const iris::EncodeTicket second = session.submit(fd, kCaptureSlot, params(0, 0, 0));
+    const iris::EncodeTicket third = session.submit(fd, kCaptureSlot, params(0, 0, 0));
+    check(raw->outstanding() == 3, "three pictures are in flight without any completion");
+    check(first.timestamp_us != second.timestamp_us && second.timestamp_us != third.timestamp_us,
+        "every ticket is distinct");
+
+    // A timeout of zero must not consume anything.
+    check(status_of([&] { session.wait_timeout(first, 0); }) == VA_STATUS_ERROR_TIMEDOUT,
+        "a zero timeout reports the picture is not ready");
+    check(raw->outstanding() == 3, "a timed-out wait leaves the picture queued");
+
+    // Completions land oldest first, and each ticket claims its own.
+    raw->release(1);
+    check(session.wait(first).bytes.size() == kPayload, "the first ticket gets its access unit");
+    raw->release(2);
+    check(session.wait(third).bytes.size() == kPayload, "a later ticket waits through the middle one");
+    check(session.wait(second).bytes.size() == kPayload, "the middle ticket was kept, not overwritten");
+    check(raw->outstanding() == 0, "every completion was consumed");
+
+    // The synchronous shape is the same path with the wait attached.
+    raw->complete_immediately();
+    check(session.encode(fd, kCaptureSlot, params(0, 0, 0)).bytes.size() == kPayload,
+        "encode() still submits and waits");
+    session.finish();
+}
+
+// A picture still with the firmware when the context goes away is resolved
+// by the drain rather than dropped: the client that submitted it and never
+// waited still gets its bytes.
+void test_drain_resolves_outstanding_pictures()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_HEVC;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    iris::EncodeParams hevc = params(0, 0, 0);
+    hevc.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+    check(status_of([&] { session.configure(hevc, 1920, 1080); }) == -1, "configure");
+    raw->hold_completions();
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    const iris::EncodeTicket ticket = session.submit(fd, kCaptureSlot, hevc);
+    check(raw->outstanding() == 1, "the picture is with the firmware");
+
+    raw->release(1);
+    session.finish();
+    check(session.wait(ticket).bytes.size() == kPayload, "the drain kept the picture for its ticket");
+}
+
 } // namespace
 
 int main()
@@ -528,6 +633,8 @@ int main()
     test_change_needs_a_new_context();
     test_timestamps_never_go_backwards();
     test_on_demand_idr();
+    test_pipelined_pictures();
+    test_drain_resolves_outstanding_pictures();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

@@ -1645,7 +1645,10 @@ raw framemd5 compares frame layouts as much as pixels.
 size, `video_bitrate_mode` (VBR/CBR), the frame-level RC switch, the
 sequence-header mode, the LTR controls and the H.264/HEVC profile, level and
 QP controls. It lists no `force_key_frame`, no RAP control and no
-`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. The conclusion recorded here — that
+`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. That absence is a property of this kernel
+branch, not of the firmware: 7.3-rc4's `inst_fw_cap_sm8550_enc[]` lists
+`REQUEST_SYNC_FRAME` and `iris_ctrls.c` maps `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`
+onto it. The conclusion recorded here — that
 on-demand IDR therefore stays unimplemented — was wrong about what the
 absence rules out: the intra period is a GOP control the node does have,
 and the session uses it for one picture. See "On-demand IDR by moving the
@@ -2110,3 +2113,93 @@ and gets N released as final. FFmpeg and Chrome both keep at least one AU
 in flight, so neither hits it. This is invariant 17 in
 `docs/architecture.md`; the failure is a clear `OPERATION_FAILED`, never
 pixels from the wrong picture.
+
+## Pipelined encode: `vaSyncBuffer` and `-async_depth` (2026-10-22)
+
+The encoder used to complete one picture inside `vaEndPicture`. FFmpeg turns
+on its asynchronous path only when `vaSyncBuffer` exists
+(`libavcodec/vaapi_encode.c`, the `VA_STATUS_ERROR_UNIMPLEMENTED` probe with
+`VA_INVALID_ID`), so until now `-async_depth` did nothing and a second
+picture could not be in flight.
+
+`vaEndPicture` now submits and returns a ticket; the access unit is claimed
+by `vaSyncBuffer` on the coded buffer, by `vaSyncSurface` on the input
+surface, or by `vaMapBuffer` when the client does neither. The four encoder
+input slots are the pipeline depth, and a submit that finds them all in use
+completes the oldest picture itself instead of stalling with every CAPTURE
+slot unrearmed.
+
+### Build
+
+- Source `8241dbd` plus an uncommitted working tree, tracked-source
+  SHA-256 `710d465ed502a1cda9bc4a4acfbd5bc821c72c1945632e6f17f8a7d8631da8f5`
+  (the provenance manifest records `dirty=true`, which is accurate here).
+- Driver `build/src/v4l2_drv_video.so`, SHA-256
+  `fac86f3da4c47881f352e6c981a7e24311f638e166912ec58ccd6dc80282fc36`,
+  built from the build tree (`LIBVA_DRIVERS_PATH`), not the installed
+  package. The throughput table below was measured on the immediately
+  preceding build (`99c70568…`, identical sources except
+  `VAConfigAttribEncMaxRefFrames`); the final build was re-measured at
+  depths 1 and 4 and reproduced it (HEVC 3.211 s / 1.617 s, H.264 3.241 s /
+  1.657 s) and reproduced the byte-identical sync/async bitstream.
+- Kernel `7.2.6-sm8550-g42f3b40-iris1`, `qcom-iris.ko.zst` SHA-256
+  `4e29b74df8c9475f1b4ba4de5dc6aa34d90cb224a935459d6b5168c4590c822a`.
+- Boot ID `fd1b2389-f4f1-479e-a0aa-58464fc48a80`. Decoder `/dev/video0`,
+  encoder `/dev/video1` (both resolved by `iris_driver`).
+- FFmpeg 8.1.3.
+
+### Throughput
+
+`testsrc2` 1920x1080 at 30 fps, 600 frames, CBR 12 Mbit/s, `-g 60`, NV12
+uploaded from system memory, `ffmpeg -benchmark`, one run each:
+
+| `-async_depth` | HEVC rtime | H.264 rtime |
+| --- | ---: | ---: |
+| 1 | 3.159 s (190 fps) | 3.506 s (171 fps) |
+| 2 | 1.940 s (309 fps) | 2.101 s (286 fps) |
+| 4 | 1.605 s (374 fps) | 1.663 s (361 fps) |
+| 6 | 1.645 s (365 fps) | — |
+| 8 | 1.631 s (368 fps) | — |
+| 16 | 1.667 s (360 fps) | — |
+| 32 | 1.673 s (359 fps) | — |
+
+Depth 4 is the knee because that is how many input slots the session
+requests; deeper settings pipeline through the same four and gain nothing.
+Before this change the depth-4 numbers were what depth 1 measures now.
+
+### Correctness
+
+- `-async_depth 1` and `-async_depth 8` over the same 300 frames at CQP 24,
+  `-g 60`, produce byte-identical bitstreams (`051021fa44fc99be…`, `cmp`
+  clean). Pipelining changes scheduling, not coding decisions.
+- Every depth 4/8/16/32 stream reads back as 1920x1080, 600 frames, and
+  decodes with `ffmpeg -f null -` without an error.
+- On-demand IDR still cuts where it is asked under pipelining: 24 fps,
+  `-g 60 -force_key_frames expr:gte(t,n_forced*1) -async_depth 4 -f segment
+  -segment_time 1` yields 24 segments, each starting on a key frame.
+- The decode matrix is unchanged on the same build: H.264, HEVC, VP9 and AV1
+  all `PASS … content=frame-md5` with `timeouts=0 drops=0`, and AV1 still
+  reports `submitted=50 capture=50 noshow=23`.
+
+### Acceptance on the final build
+
+Same build (`fac86f3d…`), 1920x1080 `testsrc2`, `-async_depth 4`:
+
+| Case | Result |
+| --- | --- |
+| H.264 High, 300 frames, CQP 24, `-g 60` | 300 frames, 13122096 bytes, 5 key frames, decodes clean |
+| HEVC Main, 300 frames, CQP 24, `-g 60` | 300 frames, 14301743 bytes, 5 key frames, decodes clean |
+| HEVC 4K, 120 frames, CBR 20 Mbit/s | 3840x2160, 120 frames, decodes clean |
+| H.264 + HEVC in two processes at once | both complete |
+
+The HEVC acceptance run moved the `iris` IRQ line from 37318 to 37924
+(delta 606) on `/proc/interrupts` line 229, so the work is on the hardware
+encoder and not in a copy path.
+
+### Host tests
+
+`test/encode-session-test` gained two cases: three pictures in flight with
+every completion withheld (each ticket claims its own access unit, a later
+ticket waits through the middle one, and a zero timeout consumes nothing),
+and a picture still outstanding when the context is destroyed, which the
+drain resolves for its ticket rather than dropping.

@@ -26,6 +26,10 @@ namespace {
 constexpr unsigned kOutputSlots = 4;
 constexpr unsigned kCaptureSlots = 4;
 constexpr int kPollMs = 20;
+// A client's vaSyncBuffer timeout is a bound, not a schedule. Cap it so a
+// millisecond value mistaken for a nanosecond one cannot hold a thread for
+// years.
+constexpr uint64_t kMaxTimeoutNs = 60ull * 1000 * 1000 * 1000;
 
 int bitrate_mode(RateMode mode)
 {
@@ -314,19 +318,6 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     }
 }
 
-void EncoderSession::reclaim_output(Clock::time_point limit)
-{
-    for (;;) {
-        if (auto done = device_->dequeue_buffer(Queue::Output)) {
-            free_output_.push_back(done->index);
-            return;
-        }
-        if (Clock::now() >= limit)
-            throw Error(VA_STATUS_ERROR_TIMEDOUT, "encoder input buffer was not returned");
-        device_->poll(POLLIN | POLLPRI, kPollMs);
-    }
-}
-
 std::optional<Dequeued> EncoderSession::wait_capture(Clock::time_point limit)
 {
     for (;;) {
@@ -338,10 +329,45 @@ std::optional<Dequeued> EncoderSession::wait_capture(Clock::time_point limit)
     }
 }
 
-EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params)
+EncoderSession::Clock::time_point EncoderSession::wait_deadline(uint64_t timeout_ns) const
+{
+    // The client's timeout can only shorten the session's own bound: a
+    // firmware that stops answering must not pin a thread forever just
+    // because the client asked for VA_TIMEOUT_INFINITE.
+    const Clock::time_point session_limit = deadline();
+    if (timeout_ns == VA_TIMEOUT_INFINITE)
+        return session_limit;
+    const uint64_t capped = std::min<uint64_t>(timeout_ns, kMaxTimeoutNs);
+    return std::min(session_limit, Clock::now() + std::chrono::nanoseconds(capped));
+}
+
+void EncoderSession::take_output_slot(Clock::time_point limit)
+{
+    // Called with mutex_ held. Every input slot is with the firmware, so the
+    // only way forward is to let it finish something: complete_one() takes
+    // the CAPTURE completion, requeues that slot, and returns the input
+    // buffer. A client that submits deeper than the slot count (FFmpeg's
+    // -async_depth) parks here while another thread may never call wait(),
+    // so this path has to pump the queue itself or the firmware stalls with
+    // every CAPTURE slot unrearmed.
+    while (free_output_.empty()) {
+        if (complete_one())
+            continue;
+        if (Clock::now() >= limit)
+            throw Error(VA_STATUS_ERROR_TIMEDOUT, "encoder input buffer was not returned");
+        // Drop the lock across poll(): a thread waiting on an earlier picture
+        // needs it to claim its completion.
+        mutex_.unlock();
+        device_->poll(POLLIN | POLLPRI, kPollMs);
+        mutex_.lock();
+    }
+}
+
+EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     require(configured_ && !finished_, "encoder is not streaming", VA_STATUS_ERROR_OPERATION_FAILED);
+    require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
     apply_dynamic(params);
 
     // The node exposes no V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME and the
@@ -371,8 +397,7 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
     const uint64_t timestamp_us = timestamp_us_;
 
     const Clock::time_point limit = deadline();
-    if (free_output_.empty())
-        reclaim_output(limit);
+    take_output_slot(limit);
     const unsigned index = free_output_.front();
     free_output_.pop_front();
     // The intra period goes back to the session's value before the picture is
@@ -385,33 +410,127 @@ EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const
     // poisons the instance.
     device_->queue_buffer_dmabuf(Queue::Output, index, dmabuf_fd, dmabuf_length, dmabuf_length, timestamp_us, 0);
 
-    const std::optional<Dequeued> completion = wait_capture(limit);
-    require(completion.has_value(), "encoder produced no access unit", VA_STATUS_ERROR_TIMEDOUT);
-    require(!completion->error(), "encoder returned an error buffer", VA_STATUS_ERROR_ENCODING_ERROR);
-    require(completion->index < capture_.size(), "encoder returned an unknown buffer",
-        VA_STATUS_ERROR_ENCODING_ERROR);
-    const CaptureSlot& slot = capture_[completion->index];
-    require(completion->data_offset <= completion->bytesused && completion->bytesused <= slot.length,
-        "encoder payload exceeds its buffer", VA_STATUS_ERROR_ENCODING_ERROR);
+    Pending submitted;
+    submitted.ticket.timestamp_us = timestamp_us;
+    submitted.params = params;
+    submitted.force_idr = force_idr;
+    issued_us_ = timestamp_us;
+    pending_.push_back(std::move(submitted));
+    return pending_.back().ticket;
+}
 
+bool EncoderSession::complete_one()
+{
+    // Called with mutex_ held. A completion belongs to the oldest picture
+    // still waiting: the firmware answers OUTPUT in the order it consumed it,
+    // which is the order submit() queued them. The finished picture leaves
+    // pending_ and waits in `completed_` for whichever thread holds its
+    // ticket, so a later completion can never overwrite it.
+    const std::optional<Dequeued> done = device_->dequeue_buffer(Queue::Capture);
+    if (!done)
+        return false;
+    // A bare LAST is the drain marker: it carries no payload, so it belongs
+    // to no picture. Reading it as one would take the next ticket's access
+    // unit and give that ticket an empty buffer.
+    if (done->last() && !done->bytesused) {
+        trace_("encode drain marker");
+        return false;
+    }
+    require(!done->error(), "encoder returned an error buffer", VA_STATUS_ERROR_ENCODING_ERROR);
+    require(done->index < capture_.size(), "encoder returned an unknown buffer", VA_STATUS_ERROR_ENCODING_ERROR);
+    const CaptureSlot& slot = capture_[done->index];
+    require(done->data_offset <= done->bytesused && done->bytesused <= slot.length,
+        "encoder payload exceeds its buffer", VA_STATUS_ERROR_ENCODING_ERROR);
+    require(!pending_.empty(), "encoder completed a picture that was never submitted",
+        VA_STATUS_ERROR_ENCODING_ERROR);
+
+    Pending picture = std::move(pending_.front());
+    pending_.pop_front();
     EncodeResult result;
-    result.bytes.assign(slot.mapping + completion->data_offset, slot.mapping + completion->bytesused);
-    // A requested IDR came from the intra period, not from the firmware's
-    // own sync frame, so it may carry no SPS/PPS: a stream cut there would
-    // fail to decode. Prefix the ones the last access unit carried.
-    if (force_idr && prepare_)
+    result.bytes.assign(slot.mapping + done->data_offset, slot.mapping + done->bytesused);
+    // A requested IDR came from the intra period, not from the firmware's own
+    // sync frame, so it may carry no SPS/PPS: a stream cut there would fail to
+    // decode. Prefix the ones the last access unit carried.
+    if (picture.force_idr && prepare_)
         result.bytes = prepare_(result.bytes, parameter_sets_);
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
     // evidence (an IDR NAL at every GOP boundary).
     trace_("encode frame index=%u bytes=%zu idr=%d", frames_++, result.bytes.size(),
-        params.keyframe ? 1 : 0);
+        picture.params.keyframe ? 1 : 0);
+    completed_.emplace(picture.ticket.timestamp_us, std::move(result));
 
-    if (!completion->last())
+    if (!done->last())
         device_->queue_buffer(Queue::Capture, slot.index, slot.length, 0, 0);
-    reclaim_output(limit);
+    if (auto output = device_->dequeue_buffer(Queue::Output))
+        free_output_.push_back(output->index);
+    if (done->last())
+        drained_ = true;
     cold_ = false;
-    return result;
+    return true;
+}
+
+EncodeResult EncoderSession::wait(EncodeTicket ticket)
+{
+    return wait_timeout(ticket, VA_TIMEOUT_INFINITE);
+}
+
+EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_ns)
+{
+    const Clock::time_point limit = wait_deadline(timeout_ns);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
+            auto it = completed_.find(ticket.timestamp_us);
+            if (it != completed_.end()) {
+                EncodeResult result = std::move(it->second);
+                completed_.erase(it);
+                claim(ticket);
+                return result;
+            }
+            // A ticket that was already answered is not an error: FFmpeg
+            // syncs the input surface and the coded buffer, and the second
+            // call has nothing left to wait for.
+            if (claimed(ticket))
+                return EncodeResult {};
+            require(!finished_, "encoder finished with a picture outstanding", VA_STATUS_ERROR_OPERATION_FAILED);
+            require(ticket_known(ticket), "ticket does not belong to this session", VA_STATUS_ERROR_INVALID_PARAMETER);
+            complete_one();
+            it = completed_.find(ticket.timestamp_us);
+            if (it != completed_.end()) {
+                EncodeResult result = std::move(it->second);
+                completed_.erase(it);
+                claim(ticket);
+                return result;
+            }
+        }
+        require(Clock::now() < limit, "encoder produced no access unit", VA_STATUS_ERROR_TIMEDOUT);
+        device_->poll(POLLIN | POLLPRI, kPollMs);
+    }
+}
+
+void EncoderSession::claim(EncodeTicket ticket)
+{
+    claimed_us_ = std::max(claimed_us_, ticket.timestamp_us);
+}
+
+bool EncoderSession::claimed(EncodeTicket ticket) const
+{
+    return ticket.timestamp_us != 0 && ticket.timestamp_us <= claimed_us_;
+}
+
+bool EncoderSession::ticket_known(EncodeTicket ticket) const
+{
+    for (const Pending& picture : pending_)
+        if (picture.ticket.timestamp_us == ticket.timestamp_us)
+            return true;
+    return false;
+}
+
+EncodeResult EncoderSession::encode(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params)
+{
+    return wait(submit(dmabuf_fd, dmabuf_length, params));
 }
 
 void EncoderSession::finish()
@@ -422,8 +541,11 @@ void EncoderSession::finish()
     finished_ = true;
 
     // STOP puts the drain marker on the raw port; the firmware returns the
-    // pictures it still holds and marks the last one. The VA client has
-    // already received every access unit, so the tail is discarded.
+    // pictures it still holds and marks the last one. Every submitted
+    // picture still owes its ticket holder an access unit, so the drain
+    // resolves them rather than discarding: a client that submitted and
+    // never waited gets its bytes, and one that waits after the context is
+    // gone finds them in completed_ instead of a timeout.
     try {
         device_->encoder_command(V4L2_ENC_CMD_STOP);
     } catch (const std::exception& error) {
@@ -431,19 +553,22 @@ void EncoderSession::finish()
     }
     try {
         const Clock::time_point limit = deadline();
-        for (;;) {
-            const std::optional<Dequeued> done = wait_capture(limit);
-            if (!done) {
-                trace_("encode drain result=timeout");
+        while (!pending_.empty()) {
+            if (complete_one())
+                continue;
+            if (Clock::now() >= limit) {
+                trace_("encode drain result=timeout outstanding=%zu", pending_.size());
                 break;
             }
-            if (done->last()) {
-                trace_("encode drain result=last");
-                break;
-            }
-            if (done->index < capture_.size())
-                device_->queue_buffer(Queue::Capture, done->index, capture_[done->index].length, 0, 0);
+            // Complete outside the lock, the way wait() does: the firmware
+            // needs time, and holding mutex_ across poll() would block the
+            // thread that submitted.
+            mutex_.unlock();
+            device_->poll(POLLIN | POLLPRI, kPollMs);
+            mutex_.lock();
         }
+        if (pending_.empty() && !drained_)
+            trace_("encode drain result=complete");
     } catch (const std::exception& error) {
         trace_("encode drain failed: %s", error.what());
     }
@@ -467,6 +592,12 @@ void EncoderSession::finish()
         device_->request_buffers(Queue::Output, 0, V4L2_MEMORY_DMABUF);
     } catch (const std::exception& error) {
         trace_("encode release failed: %s", error.what());
+    }
+    // A picture the drain could not resolve has no bytes to hand anyone; its
+    // ticket is answered with the finished state rather than a stale success.
+    if (!pending_.empty()) {
+        healthy_ = false;
+        pending_.clear();
     }
 }
 

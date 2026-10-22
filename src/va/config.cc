@@ -86,9 +86,13 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP) : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxRefFrames:
-            // l0 in the low 16 bits, l1 in the high half. Two L0 references,
-            // none ahead of the current picture: no B-frames.
-            attributes[i].value = encode ? 2 : VA_ATTRIB_NOT_SUPPORTED;
+            // l0 in the low 16 bits, l1 in the high half. One L0 reference,
+            // none ahead of the current picture: the firmware keeps the
+            // previous reconstructed frame and nothing else, which is why
+            // the encoder refuses num_ref_idx_l0_active_minus1 != 0 and
+            // there are no B-frames. Advertising 2 here would promise a
+            // second reference the picture parameters cannot ask for.
+            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         default:
             // Packed headers, slice structure, ROI, quality range and tiles

@@ -165,13 +165,15 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- **按需 IDR 是挪 GOP 挪出来的，靠的不是关键帧控制项。** 节点没有
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，固件能力表里也没有 RAP 控制项，所以
-  客户端要 IDR 时，驱动把这一张图的 intra period 设成 0，并在这张图入队之前
-  把周期改回去。`-force_key_frames` 配 `-c copy` 或者分段封装，切点就在它要的
-  位置；下一个自动 IDR 在这一次之后一个 GOP 处，而不是原来的排期上。每张
-  请求 IDR 的图都要多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。
-  请求出来的 IDR 可以当切点用：它带着固件上一次写出的 SPS/PPS（以及 SEI）。
+- **按需 IDR 是挪 GOP 挪出来的，靠的不是关键帧控制项。** 目标机跑的内核分支
+  （7.2.6）没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，所以客户端要 IDR 时，
+  驱动把这一张图的 intra period 设成 0，并在这张图入队之前把周期改回去。
+  固件本身有这个能力：更新的内核树（7.3-rc4）在 SM8550 编码器能力表里列了
+  `REQUEST_SYNC_FRAME` 并把它接到这个控制项上，内核带上它之后就不需要挪周期。
+  `-force_key_frames` 配 `-c copy` 或者分段封装，切点就在它要的位置；下一个
+  自动 IDR 在这一次之后一个 GOP 处，而不是原来的排期上。每张请求 IDR 的图都要
+  多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。请求出来的 IDR 可以
+  当切点用：它带着固件上一次写出的 SPS/PPS（以及 SEI）。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。
@@ -183,8 +185,13 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   （H.264 的 extradata 43 字节，HEVC 124 字节）。GStreamer 的 VA 编码器要求
   驱动至少声明一种 packed header，否则直接拒绝，因此 `vah264enc` /
   `vah265enc` 用不了；FFmpeg 的 `h264_vaapi` / `hevc_vaapi` 可以。
-- **一个 context 同时只编一张图。** `vaEndPicture` 同步跑完整个 V4L2 事务，
-  VA context 的分辨率又是固定的：换分辨率要新建 context。
+- **编码是流水线的，`-async_depth` 生效。** `vaEndPicture` 把图排进队列就返回，
+  码流由 `vaSyncBuffer` 在 coded buffer 上取（不调同步的客户端在
+  `vaMapBuffer` 时取）。FFmpeg 看到 `vaSyncBuffer` 就走异步路径，`-async_depth`
+  可以把编码器的四个输入槽全部用上：目标机上 1080p HEVC 从 depth 1 的 190 fps
+  升到 depth 4 的 372 fps，各档位输出逐字节相同。对输入 surface 调
+  `vaSyncSurface` 仍然有效，含义是同一张图的完成。VA context 的分辨率是固定的：
+  换分辨率要新建 context。
 - **不支持 multi-slice、tiles、ROI 和 `-max_frame_size`。** FFmpeg 请求这些
   会直接报错，不会被静默忽略。驱动自己也守同样的规矩：picture 参数里
   slice 多于一个、tiles、wavefront 编码、加权预测、scaling list、chroma QP

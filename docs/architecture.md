@@ -230,17 +230,33 @@ Ordering facts learned on this firmware and kept verbatim:
 
 ### 4.1 Encode session
 
-The encoder is the other M2M node and has its own, much smaller machine. It
-is synchronous: one VA picture is one V4L2 transaction, completed inside
-`vaEndPicture`.
+The encoder is the other M2M node and has its own, much smaller machine. A
+picture is split in two: `vaEndPicture` submits the raw frame, and the
+access unit is claimed later — by `vaSyncBuffer` on the coded buffer, by
+`vaSyncSurface` on the input surface, or by `vaMapBuffer` on the coded
+buffer for a client that does neither. The split is what lets FFmpeg
+pipeline: `vaapi_encode.c` turns on its asynchronous path only when
+`vaSyncBuffer` exists.
 
 ```
 Closed --first end_picture--> Configured(CAPTURE S_FMT codec, OUTPUT S_FMT NV12,
     crop, controls, S_PARM, REQBUFS 4 on both queues, STREAMON both, QBUF all CAPTURE)
-Configured/Streaming --end_picture--> Streaming(QBUF one raw buffer, poll CAPTURE,
-    DQBUF pair, copy bytes, requeue CAPTURE)
-Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
+Configured/Streaming --end_picture--> Streaming(QBUF one raw buffer; returns a ticket)
+Streaming --sync/map--> Streaming(DQBUF CAPTURE, copy bytes, requeue CAPTURE,
+    DQBUF OUTPUT to free the input slot)
+Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding ticket) --> Closed
 ```
+
+- Completions are attributed by submission order, not by timestamp: the
+  firmware answers OUTPUT in the order it consumed it. Four input slots are
+  the pipeline depth; a fifth submit pumps the queue itself (completing the
+  oldest picture) rather than deadlocking against a thread that has not
+  asked for its access unit yet.
+- A completion is kept until its ticket holder claims it. A ticket that was
+  already answered returns success rather than "unknown ticket", because
+  FFmpeg syncs both the input surface and the coded buffer.
+- `vaSyncBuffer(display, VA_INVALID_ID, 0)` is FFmpeg's capability probe.
+  It must answer success; anything else makes every encode synchronous.
 
 - Every `S_FMT` may substitute a fourcc; the session re-reads `G_FMT` and
   requires the codec, width and height it asked for.
@@ -289,10 +305,14 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
   extracts `avcC`/`hvcC` from the first packet; GStreamer's VA encoder
   refuses to start at all, which is the price of not advertising. Anything
   that does need packed headers is a separate change with its own evidence.
-- The running SM8550 module exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`
-  (`v4l2-ctl -d <encoder> --list-ctrls` shows the GOP size and the QP
-  controls, no key-frame request), which is why the intra period is the
-  lever above and not a control write of its own.
+- The running SM8550 module (kernel branch 7.2.6) exposes no
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`v4l2-ctl -d <encoder>
+  --list-ctrls` shows the GOP size and the QP controls, no key-frame
+  request), which is why the intra period is the lever above and not a
+  control write of its own. The firmware has the property — 7.3-rc4's
+  `inst_fw_cap_sm8550_enc[]` lists `REQUEST_SYNC_FRAME` and
+  `iris_ctrls.c` maps the control onto it — so a kernel carrying that
+  commit removes the need for the lever.
 - Deblocking is a slice header property in VA and a per-context control in
   V4L2, so `configure_deblocking` reads the first slice and writes
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
@@ -321,8 +341,10 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, DQBUF to LAST) --> Closed
 - The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
   mismatched surface is an error rather than a reconfigure.
 - After `V4L2_ENC_CMD_STOP` the last CAPTURE buffer carries `LAST`. Every
-  picture has already been handed to its coded buffer when `vaEndPicture`
-  returns, so the drain exists only to close the firmware cleanly.
+  picture still outstanding when the context is destroyed is resolved by the
+  drain rather than discarded, so a client that submitted and never waited
+  still gets its bytes; only a picture the firmware never returns leaves its
+  ticket unanswered.
 
 ## 5. Module layout
 
@@ -342,8 +364,8 @@ src/
                       the compressed format
     session.{h,cc}    Session: the only ioctl sequencer (state machine of §4),
                       publish dispatch, Import backlog
-    encode.{h,cc}     EncoderSession: configure, one synchronous picture per
-                      call, STOP/drain on finish (§4.1)
+    encode.{h,cc}     EncoderSession: configure, submit/wait split, STOP/drain
+                      on finish (§4.1)
     slots.{h,cc}      Frame + SlotPool: allocate, export, requeue, and the
                       Import queue (queue_capture_import, one window slot)
     publish.{h,cc}    CopyEngine interface + CPU engine
@@ -542,10 +564,11 @@ them).
    released; a completion whose token does not match its buffer's token
    fails both surfaces and is counted as `misplaced`.
 10. An encoded picture lands only in the coded buffer the client named in
-    `VAEncPictureParameterBuffer{H264,HEVC}::coded_buf`. `vaEndPicture`
-    returning `SUCCESS` means those bytes are already there (plus a
-    `VACodedBufferSegment` they can be read through); a payload larger than
-    the buffer's capacity is `ENCODING_ERROR`, never a truncation.
+    `VAEncPictureParameterBuffer{H264,HEVC}::coded_buf`, and only once its
+    ticket is claimed (`vaSyncBuffer`, `vaSyncSurface`, or the `vaMapBuffer`
+    fallback). A payload larger than the buffer's capacity is
+    `ENCODING_ERROR`, never a truncation. A submitted picture is never
+    dropped: the drain resolves whatever is still outstanding.
 11. An encode surface is input only. It never carries a decode target, and
     the session queues exactly one raw buffer per picture, so a picture
     cannot be encoded into a buffer that still holds the next one.
