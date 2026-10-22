@@ -2540,3 +2540,177 @@ sequence and picture buffers are now locals in every affected case.
 
 `rollback.sh` restores the stock module; `cp qcom-iris.0003.ko.zst` over
 the installed file restores the previous patched module. Both need a reboot.
+
+## Against piano, on the same tablet (2026-10-22)
+
+piano (`radxa-pkg/libva-v4l2` 1.0.0, the sibling backend) publishes
+throughput for SC8280XP on a Radxa Dragon Q8B. Those numbers cannot be
+read against this tablet's: a different SoC, a different Iris generation
+and a different firmware build. The comparison below runs both drivers
+on sheng instead, in the same boot, through the same FFmpeg.
+
+### Setup
+
+- Source `972e285` (`feat/encode-entrypoints`), driver
+  `build-def/src/v4l2_drv_video.so` SHA-256
+  `f3b37e6ad91b76b5ba1b9ec20af055f9494594fec4207a6638313558a3239f24`,
+  built on the target with `buildtype=debugoptimized`.
+- piano at tag `v1.0.0` (`0e4ce1e`), built on the target with
+  `buildtype=release` and its default `-Dfastcv=disabled`; SHA-256
+  `798cfd62a91c51be733aa8f28b98b1289a30dd7b0cca4d1c84cda7b6efac7937`.
+  Its own release packages disable FastCV the same way, and sheng's CDSP
+  cannot open a FastRPC session, so neither side has the VPP.
+- FFmpeg 8.1.3, libva 2.23.0, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+  `40916c73-1560-484d-bd2e-82fed9bab285`. Decoder `/dev/video0`, encoder
+  `/dev/video1`, both resolved by the `iris_driver` name.
+- Each driver was selected with `LIBVA_DRIVER_NAME=v4l2` and its own
+  `LIBVA_DRIVERS_PATH`; neither was installed. Three runs per cell, mean
+  reported, in both the decode and the encode tables. Every row moved
+  the Iris IRQ counter (583 to 1807 per run), so none of them fell back
+  to software.
+- Decode clips: `testsrc2` at 720p, 1080p and 4K, 600 or 300 frames,
+  H.264 from `libx264 -preset ultrafast -qp 20 -bf 0` and HEVC from
+  `libx265 -preset ultrafast -crf 22 keyint=60`, plus VP9
+  (`libvpx-vp9`) and AV1 (`libsvtav1`) at 1080p. The real-content rows
+  are the tracked Sintel re-encodes already listed above.
+
+### Decode, synthetic clips (frames/s, no download)
+
+| Clip | This driver | piano | piano vs this |
+| --- | ---: | ---: | ---: |
+| H.264 720p | 907 | 836 | -8% |
+| H.264 1080p | 760 | 681 | -10% |
+| HEVC 720p | 720 | 686 | -5% |
+| HEVC 1080p | 523 | 464 | -11% |
+| H.264 4K | 339 | 221 | -35% |
+| HEVC 4K | 201 | 120 | -40% |
+| VP9 1080p | 571 | 524 | -8% |
+| AV1 1080p | 692 | fails | — |
+
+The gap widens with frame size and has this driver ahead on both codecs,
+which is the opposite of what the HEVC slice rewrite would predict: both
+drivers re-emit HEVC slice headers there, and neither rewrites H.264
+slices (both copy them verbatim). The cause was not isolated. What the
+table supports is narrower than a mechanism: on this firmware this
+driver keeps more of a 4K stream's time off the CPU than piano does, and
+the difference shrinks to single digits at 1080p and below. The 4K HEVC
+runs are the noisiest cell (piano 2.03 to 2.78 s, this driver 1.45 to
+1.59 s); even piano's fastest run is slower than this driver's slowest.
+
+piano advertises no AV1 profile, so `-hwaccel vaapi` on the AV1 clip
+fails at `av1 @ … Failed setup for format vaapi` before a single picture
+is submitted (exit 69, IRQ delta 0).
+
+### Decode, real content with B-frames (frames/s)
+
+| Clip | This driver | piano | piano vs this |
+| --- | ---: | ---: | ---: |
+| H.264 High, 2 B-frames, 1080p24 | 311 | 311 | -0.0% |
+| HEVC Main, 2 B-frames, 1080p24 | 492 | 493 | -0.2% |
+| HEVC Main10, 1080p | 457 | 455 | +0.5% |
+| VP9 alt-ref, 1080p | 150 | 150 | +0.2% |
+
+On reordered, 10-bit and alt-ref content the two drivers are the same
+within run-to-run noise: what is left is firmware time, and neither
+driver's bookkeeping shows through. The synthetic-clip gap is therefore
+a cost on the path this driver takes and piano does not, not a general
+decode difference.
+
+Frame exactness was checked for the 1080p H.264 and HEVC clips by
+comparing a `framemd5` of `hwdownload,format=nv12` against the software
+decode. Both drivers MATCH on both codecs.
+
+### Encode, at settings that produce the same bitstream
+
+CQP removes rate control from the picture, so the two drivers can be
+compared on output rather than on a rate target they may pursue
+differently. At `-rc_mode CQP -q:v 24` and `-q:v 30`, 1080p, 300
+frames, the H.264 streams are **byte for byte identical** between the
+two drivers, and so is the `-q:v 24` HEVC stream and the same setting on
+the Sintel clip. Both sides therefore reach the firmware through the
+same encode contract; whatever differs below is not the coded core.
+
+Throughput at that setting, 300 frames, `-async_depth 1` and `4`, three
+runs per cell, mean:
+
+| Clip | This driver d=1 | piano d=1 | This driver d=4 | piano d=4 |
+| --- | ---: | ---: | ---: | ---: |
+| H.264 1080p | 235 fps | 196 fps | 439 fps | 424 fps |
+| HEVC 1080p | 249 fps | 208 fps | 453 fps | 423 fps |
+| H.264 4K | 85 fps | 74 fps | 116 fps | 110 fps |
+| HEVC 4K | 99 fps | 83 fps | 121 fps | 119 fps |
+
+This driver is ahead in every cell: 13 to 17% at depth 1, and 2 to 7% at
+depth 4, where the two converge because the firmware, not the driver, is
+the constraint. A single earlier run had piano 10% ahead at depth 4 on
+1080p; the three-run repeats above do not reproduce it (piano 0.65 to
+0.80 s against this driver's 0.53 to 0.78 s), so that reading was
+noise. Both drivers scale the same way, and this driver's own pipelining
+record (depth 1 to 4, 190 to 374 fps, byte-identical output) is above.
+
+### Encode, rate control: an open difference
+
+At a rate target the two drivers do not agree, and the gap is on
+piano's side of the comparison:
+
+| Request | This driver | piano |
+| --- | ---: | ---: |
+| CQP `-q:v 24` | 3045 kbit/s | 3045 kbit/s (identical bytes) |
+| CBR 4 Mbit/s | 4034 kbit/s | 741 kbit/s |
+| CBR 24 Mbit/s | 21274 kbit/s | 880 kbit/s |
+| VBR 4 Mbit/s | 9780 kbit/s | 808 kbit/s |
+
+600 frames of `sintel-1080p30-h264-b3.mp4` at 30 fps; the kbit/s figure
+is bytes x 8 / 20 s. This driver tracks the request; piano does not move
+with it. The same 4 Mbit/s request on `testsrc2` gives 4034 against
+1854195 bytes over 20 s, i.e. the same shape.
+
+What was ruled out on piano, each by rebuilding it and re-measuring:
+
+- **Its own values.** With `IRIS_VAAPI_DEBUG=1` it reports
+  `bitrate=4000000 peak=4000000 mode=2 (CBR)`, so the client's request
+  reaches it intact.
+- **The GOP control.** It writes `GOP_SIZE = INT_MAX` and requests
+  keyframes through VA instead. Replacing that with 59 left the output
+  at 741 kbit/s.
+- **The frame rate.** It derives the rate from VA's sequence parameters
+  (24/1 for this clip) rather than from the stream rate. Re-encoding the
+  source at 30 fps and feeding that changed it to 669 kbit/s, not to
+  4000.
+- **The header mode.** Adding `HEADER_MODE = JOINED_WITH_1ST_FRAME` to
+  this driver left this driver's output unchanged at 4034.
+- **QP bounds.** Pinning 1..51, and passing `-qmin/-qmax` through
+  FFmpeg, left both drivers unchanged.
+- **The control list.** A scratch copy of this driver with piano's exact
+  control list (GOP `INT_MAX`, header mode, min/max QP) still produced
+  4039 kbit/s.
+
+So the difference is not in the control writes either driver makes, and
+the root cause was not isolated. It is recorded as an open item rather
+than attributed. The observation that stands: on this target, at these
+settings, this driver's rate control follows the client's request and
+piano's does not. One shape is worth checking first in any follow-up:
+piano's output at every target lands near 700 to 900 kbit/s, which is
+close to what a fixed QP near its default 20 would give on this content,
+so a firmware that ignores its rate-control property while honouring
+explicit QP would look exactly like this. That is a hypothesis, not a
+finding; it was not tested.
+
+### What this comparison does not show
+
+- It does not reproduce piano's published SC8280XP numbers, and does not
+  claim to: the SoC, the Iris generation and the firmware differ.
+- It says nothing about Chrome, mpv, VLC or GStreamer. Those runs are in
+  the client-coverage section above and have no piano counterpart here.
+- The `-Dfastcv=disabled` build is piano's own default and the only one
+  obtainable on this tablet, but it is not the configuration its README
+  describes when it lists FastCV VPP as a feature.
+- Three runs per cell throughout. The encode cells at depth 4 still
+  spread by up to 0.25 s run to run, so the 2 to 7% advantage there is
+  the shape of the result, not a precise figure; the rate-control gap
+  (5x) and the depth-1 encode gap (13 to 17%) are far outside that
+  spread.
+- The VP9 and AV1 rows are one clip each at one resolution. The VP9 row
+  shows the two drivers agree where both decode; the AV1 row shows only
+  that piano has no AV1 entrypoint on this node, not how an AV1
+  implementation of its own would compare.
