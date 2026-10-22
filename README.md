@@ -63,14 +63,14 @@ geometry. A VA context that only returns bytes proves nothing.
   because the number moves between boots).
 - Any Linux distribution that can load a libva module. Fedora 44 is the
   qualified one; Fedora and Arch packaging is provided.
-- Optionally, three Iris kernel changes (decode-order output, a 64-buffer
-  CAPTURE pool and the encoder loop-filter controls) from
-  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2), carried
-  rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
-  module-only build recipe. On a stock kernel the driver detects their
-  absence and still works; Chrome then gets a GPU copy per frame instead of
-  the zero-copy path, and an encoder deblocking request other than the
-  firmware default is refused.
+- Optionally, four Iris kernel changes (decode-order output, a 64-buffer
+  CAPTURE pool, the encoder loop-filter controls and the encoder's
+  `REQUEST_SYNC_FRAME` control) carried rebased in
+  [`packaging/kernel/`](packaging/kernel/README.md) with a module-only build
+  recipe. On a stock kernel the driver detects their absence and still works;
+  Chrome then gets a GPU copy per frame instead of the zero-copy path, an
+  encoder deblocking request other than the firmware default is refused, and
+  a requested IDR moves the intra period.
 
 ## Install and use
 
@@ -194,19 +194,19 @@ is usable as an encode input as well.
 - **One qualified device.** Everything above was measured on one SM8550
   tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
   packaging is provided but not validated.
-- **On-demand IDR works by moving the GOP, not by a keyframe control.** The
-  kernel branch the target runs (7.2.6) exposes no
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so a requested IDR is produced by
-  setting the intra period to zero for that one picture and putting it back
-  before the picture is queued. The firmware does have the property: newer
-  trees (7.3-rc4) list `REQUEST_SYNC_FRAME` in the SM8550 encoder capability
-  table and wire it to that control, so a kernel carrying it would make the
-  lever unnecessary. `-force_key_frames` with a stream copy or a
-  segment muxer therefore cuts where it asks; the next automatic IDR is one
-  GOP after the requested one, not after the original schedule. The
-  intra-period change is a control write per requested picture, so a request
-  on every frame costs more than a plain intra-only stream. A requested IDR
-  is a cut point: it carries the last SPS/PPS (and SEI) the firmware wrote.
+- **On-demand IDR moves the GOP on the stock kernel.** The kernel branch the
+  target runs (7.2.6) exposes no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so a
+  requested IDR is produced by setting the intra period to zero for that one
+  picture and putting it back before the picture is queued. The firmware has
+  the property, and `packaging/kernel/0003-*` carries the upstream
+  `REQUEST_SYNC_FRAME` patch that exposes it; the driver probes for the
+  control and uses it when the kernel has it, leaving the GOP alone. On a
+  kernel without the patch, `-force_key_frames` with a stream copy or a
+  segment muxer still cuts where it asks, and the next automatic IDR is one
+  GOP after the requested one rather than on the original schedule. The
+  intra-period lever is a control write per requested picture, so a request
+  on every frame costs more than a plain intra-only stream. A requested IDR is
+  a cut point: it carries the last SPS/PPS (and SEI) the firmware wrote.
 - **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
   break the one-in-one-out model. A context whose sequence parameters ask for
   `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.
@@ -277,11 +277,12 @@ MIT with LGPL-2.1-covered parts, the same terms as upstream; see `COPYING`,
   the browser acceptance gates and the packaging are this fork's work.
 - `include/linux/` vendors the kernel UAPI headers under their own SPDX tag
   (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
-- `packaging/kernel/` carries three Iris kernel changes from
-  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa, Xilin
-  Wu). They touch GPL-2.0 kernel code and carry that license, not the
-  driver's. The explicit-RPS HEVC slice rewrite follows the same project's
-  approach.
+- `packaging/kernel/` carries four Iris kernel changes in three patches:
+  three from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
+  (Radxa, Xilin Wu) and the encoder half of an upstream `REQUEST_SYNC_FRAME`
+  commit (Wangao Wang, Qualcomm). They touch GPL-2.0 kernel code and carry
+  that license, not the driver's. The explicit-RPS HEVC slice rewrite follows
+  the same project's approach.
 
 ## Environment variables
 

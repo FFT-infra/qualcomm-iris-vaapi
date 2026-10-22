@@ -1,31 +1,35 @@
 # Iris kernel module patches
 
-Two patches, from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-(Radxa, Xilin Wu), rebased onto `ianchb/sm8550-mainline` branch `sheng-7.2.6`
-(commit `42f3b40c702a`):
+Three patches. The first two are from
+[strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa, Xilin
+Wu), the third is the encoder half of an upstream commit (Wangao Wang), all
+rebased onto `ianchb/sm8550-mainline` branch `sheng-7.2.6` (commit
+`42f3b40c702a`):
 
 | Patch | Upstream | What it changes | Why the driver wants it |
 | --- | --- | --- | --- |
 | `0001-media-iris-decode-order-output-and-64-capture-buffers.patch` | `patches/0001` + `patches/0002` | Decode-order output through `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY{,_ENABLE}`; CAPTURE pool up to 64 | Chrome's zero-copy (Import) path, and the VP9 dynamic-resolution qualification |
 | `0002-media-iris-deblocking-filter-controls.patch` | `patches/0003` | H.264 loop filter mode/alpha/beta and the HEVC equivalents, sent to firmware as `HFI_PROP_DEBLOCKING_MODE` | The driver forwards a client's slice deblocking request instead of refusing a non-default one |
+| `0003-media-iris-encoder-request-sync-frame.patch` | `6f62dcefd249` | `REQUEST_SYNC_FRAME` in `inst_fw_cap_sm8550_enc`, so `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` exists and reaches firmware as `HFI_PROP_REQUEST_SYNC_FRAME` | A requested IDR becomes a firmware sync frame instead of a GOP move, and the driver prefixes no parameter sets of its own |
 
-Both patches modify GPL-2.0 kernel code (`drivers/media/platform/qcom/iris/`)
+All three modify GPL-2.0 kernel code (`drivers/media/platform/qcom/iris/`)
 and are therefore GPL-2.0, unlike the driver itself. Upstream authors are
 credited in each patch's trailer and in the driver's README. The driver works
-without either: no display-delay control means the display-order fallback and
-a GPU copy per Chrome frame; no loop-filter controls means the firmware's
+without any of them: no display-delay control means the display-order fallback
+and a GPU copy per Chrome frame; no loop-filter controls means the firmware's
 enabled, 0/0 defaults and `VA_STATUS_ERROR_UNIMPLEMENTED` for any other
-deblocking request.
+deblocking request; no sync-frame control means a requested IDR moves the
+intra period and the driver puts the last SPS/PPS in front of it.
 
 Rebuild only the module, on the target, against the running kernel:
 
 ```sh
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
-cd linux && git am ../0001-*.patch ../0002-*.patch
+cd linux && git am ../0001-*.patch ../0002-*.patch ../0003-*.patch
 ```
 
-`git am` applies both cleanly on `sheng-7.2.6`. On a differently shaped Iris
-tree expect fuzz, and check two things by hand before building:
+`git am` applies all three cleanly on `sheng-7.2.6`. On a differently shaped
+Iris tree expect fuzz, and check these by hand before building:
 
 - The capability IDs belong in `enum platform_inst_fw_cap_type` in
   `iris_platform_common.h`, not in the neighbouring
@@ -40,6 +44,15 @@ tree expect fuzz, and check two things by hand before building:
   Verify with
   `grep -c 'cap_id = DEBLOCK_MODE_H264' drivers/media/platform/qcom/iris/iris_hfi_gen2.c`
   — it must print 1.
+- Upstream 0003's second hunk also adds the same control to the gen1 encoder
+  table; `sheng-7.2.6` has no gen1 encoder on this platform, so this rebase
+  carries only the gen2 entry. After applying,
+  `grep -c 'cap_id = REQUEST_SYNC_FRAME' drivers/media/platform/qcom/iris/iris_hfi_gen2.c`
+  must print 1, and
+  `grep -c 'V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME' drivers/media/platform/qcom/iris/iris_ctrls.c`
+  must print 2 (one case in each direction of the control/capability map).
+  The same grep on `iris_venc.c` and `iris_vidc.c` must print 0: the control
+  is created from the capability table, not named again at the node.
 
 ```sh
 cp /boot/config-$(uname -r) .config

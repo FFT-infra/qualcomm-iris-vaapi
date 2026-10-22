@@ -2203,3 +2203,63 @@ every completion withheld (each ticket claims its own access unit, a later
 ticket waits through the middle one, and a zero timeout consumes nothing),
 and a picture still outstanding when the context is destroyed, which the
 drain resolves for its ticket rather than dropping.
+
+## Encoder `REQUEST_SYNC_FRAME` patch: applies and builds, not loaded (2026-10-22)
+
+The driver side of a direct IDR request is in the same uncommitted tree as
+the pipelined encode above: `configure()` writes
+`V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` once and records whether the node took
+it (`encode idr lever=sync-frame|intra-period`), a requested picture then
+writes that control and leaves the GOP alone, and a kernel without it keeps
+the intra-period lever and the parameter-set prefix from "On-demand IDR by
+moving the intra period". `test/encode-session-test` covers both shapes
+(`test_on_demand_idr_by_sync_frame` for the direct control,
+`test_on_demand_idr` for the GOP lever); `meson test` is 18/18 and
+`sh test/run-static-checks.sh` passes.
+
+`packaging/kernel/0003-media-iris-encoder-request-sync-frame.patch` is the
+kernel half: the encoder-only rebase of upstream
+`6f62dcefd249` (Wangao Wang) onto `sheng-7.2.6` (`42f3b40c702a`). It adds
+`REQUEST_SYNC_FRAME` to `enum platform_inst_fw_cap_type`, the
+`HFI_SYNC_FRAME_REQUEST_*` enum and `HFI_PROP_REQUEST_SYNC_FRAME
+(0x03000145)` to `iris_hfi_gen2_defines.h`, both directions of the
+control/capability map in `iris_ctrls.c`, `iris_set_req_sync_frame`, and one
+entry at the end of `inst_fw_cap_sm8550_enc` (`CAP_FLAG_INPUT_PORT |
+CAP_FLAG_DYNAMIC_ALLOWED`). The upstream commit also adds the control to the
+gen1 encoder table and patches `iris_hfi_gen1_command.c`; this branch has no
+gen1 encoder on the platform, so neither is carried.
+
+### What was checked, on the builder
+
+A pristine `42f3b40c702a` worktree, `git am` of 0001, 0002 and 0003 in order
+applies all three with no fuzz and no rejects. With the three applied, a
+module-only build (`make ARCH=arm64 LLVM=1 HOSTCC=gcc HOSTLD=ld
+KBUILD_MODPOST_WARN=1 KCFLAGS=-mbranch-protection=pac-ret+bti
+M=drivers/media/platform/qcom/iris modules`, clang 21.1.8, the host's
+`.config`) links `qcom-iris.ko`, `llvm-nm` lists `iris_set_req_sync_frame`,
+and `llvm-readelf -n` reports `aarch64 feature: BTI, PAC`. The module is
+2 216 bytes larger than the same tree built without 0003 (7 726 968 vs
+7 724 752), which is the control's table entry and setter. Counts on the
+patched tree: `cap_id = REQUEST_SYNC_FRAME` 1 in `iris_hfi_gen2.c` and 0
+elsewhere, `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` 2 in `iris_ctrls.c` (one
+per map direction) and 0 in `iris_venc.c`/`iris_vidc.c`, `cap_id =
+DEBLOCK_MODE_H264` still 1.
+
+The control is created from the capability table: `iris_ctrls_init()` walks
+`fw_caps[]`, calls `iris_get_v4l2_id()` and `v4l2_ctrl_new_std()`, and
+`V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` is a button
+(`v4l2-ctrls-defs.c`, `V4L2_CTRL_TYPE_BUTTON`, `EXECUTE_ON_WRITE`), so the
+core runs `s_ctrl` on every write rather than only on a value change. A
+button's value is always 0, so the driver's per-picture `S_CTRL(id, 0)` is
+the same write every time.
+
+### What is not evidence
+
+No module was installed and no boot was made: the tablet still runs
+`qcom-iris.ko.zst` `4e29b74d…` without this patch, and
+`v4l2-ctl -d <encoder> --list-ctrls` there still shows no
+`force_key_frame`. So the `sync-frame` path has unit coverage and a compiled
+kernel half, not a hardware run. Installing it means replacing the module
+and rebooting, which needs the target's owner; until then the driver's
+probe finds no control and takes the `intra-period` path, which is the one
+the records above measured.

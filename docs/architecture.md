@@ -42,22 +42,23 @@ with a self-built kernel from `ianchb/sm8550-mainline` (Iris is the
 `qcom-iris` module, HFI gen2). Because the kernel is self-built, kernel-side
 fixes are in scope.
 
-Three Iris kernel changes from `strongtz/libva-v4l2` (Radxa, Xilin Wu) are
-adopted as part of the target. The first two were first applied to a
-`sheng-7.2.2` tree; after the target moved to `kernel-sheng-7.2.6-1` the
-rebased patches and the module-only build recipe live in
-`packaging/kernel/`:
+Four Iris kernel changes are adopted as part of the target. The first two
+were first applied to a `sheng-7.2.2` tree; after the target moved to
+`kernel-sheng-7.2.6-1` the rebased patches and the module-only build recipe
+live in `packaging/kernel/`:
 
 | Patch | What it changes | Why the driver needs it |
 | --- | --- | --- |
 | decode-order output (`V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE`, delay 0) | Firmware returns pictures in decode order instead of display order | A VA client may `vaSyncSurface` a picture before submitting the ones it is reordered behind. Display-order firmware withholds it, and the only userspace escape is a timeout plus STOP/START drain. In decode order every submitted picture completes independently. |
 | CAPTURE pool up to 64 buffers | Raises the vb2 `max_num_buffers` for the gen2 decoder CAPTURE queue | Threaded VA clients keep more than 32 surfaces; a driver-owned pool needs headroom above the client's pool. |
 | encoder loop-filter controls | Exposes `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` and the HEVC equivalents, sent as `HFI_PROP_DEBLOCKING_MODE` | VA carries deblocking per slice (mode, alpha, beta); the stock kernel has no control to carry it to the firmware, so a non-default request is refused instead of being silently ignored. |
+| encoder `REQUEST_SYNC_FRAME` | Exposes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, sent as `HFI_PROP_REQUEST_SYNC_FRAME` with the sequence-header mode from `PREPEND_SPSPPS_TO_IDR` | Without it a requested IDR is produced by moving the intra period, which costs two control writes per request and leaves the parameter sets for the driver to prefix. |
 
-The third is documented and rebased but **not qualified**: the controls have
-not been exercised on hardware, so the driver keeps its refusal path and
+The last two are documented and rebased but **not qualified**: the controls
+have not been exercised on hardware, so the driver keeps its refusal path for
+deblocking and its intra-period lever for a requested IDR, and
 TEST-RESULTS.md has no run that shows a non-default filter reaching the
-firmware.
+firmware or a `force_key_frame` write reaching a loaded module.
 
 The driver **must not require** any of these. It probes for the display-delay
 control at session open and runs in one of two session modes:
@@ -275,24 +276,32 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding 
 - `GOP_SIZE` counts the I frame inside its period: programming N puts the
   next IDR at frame N+1. VA's `intra_period` is the distance between I
   frames, so the session writes `intra_period - 1`.
-- A client's per-picture IDR request (`idr_pic_flag`) is honoured by moving
-  the intra period, not by a keyframe control, which this node does not
-  have. The session sets `GOP_SIZE` to zero for that picture and puts the
-  session period back before the picture is queued: restoring after the
-  completion makes the following picture an IDR too, because the firmware
-  schedules the next boundary from the value it last saw. The lever is
-  never skipped for a request, even on a picture the firmware would make an
-  IDR anyway — a driver-side guess at the firmware's schedule drifts and
-  drops requests. The schedule re-anchors on each requested IDR (as x264
-  and libx265 do), so `-force_key_frames` and `-g` agree and the next
-  automatic IDR lands one GOP after the requested one.
+- A client's per-picture IDR request (`idr_pic_flag`) has two levers, and
+  `configure` decides once which one this kernel has by writing
+  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`: a kernel carrying
+  `REQUEST_SYNC_FRAME` takes the direct request, and one without it does not
+  have the control at all.
+  - With the control, the session sets it to zero before queueing the
+    picture and leaves the GOP alone. The kernel takes the write as a
+    one-shot for the next picture, so nothing is restored afterwards.
+  - Without it, the session sets `GOP_SIZE` to zero for that picture and puts
+    the session period back before the picture is queued: restoring after the
+    completion makes the following picture an IDR too, because the firmware
+    schedules the next boundary from the value it last saw.
+  Either lever is pulled for every requested picture, even on a picture the
+  firmware would make an IDR anyway — a driver-side guess at the firmware's
+  schedule drifts and drops requests. The schedule re-anchors on each
+  requested IDR (as x264 and libx265 do), so `-force_key_frames` and `-g`
+  agree and the next automatic IDR lands one GOP after the requested one.
 - A levered IDR is not a firmware sync frame, so it may carry no SPS/PPS:
   the firmware prefixes the parameter sets to its own IDRs only. The
   session keeps the sets and SEI the last access unit carried and puts them
   in front of a requested IDR that has none, which is what makes a stream
   cut there decodable. `src/codec/annexb.cc` does the splitting and
   understands both NAL layouts (H.264's five-bit type, HEVC's six-bit field
-  at a two-byte header).
+  at a two-byte header). With the direct control the firmware writes the
+  sync frame itself, so the prefix step finds the sets already there and
+  adds nothing.
 - CQP turns firmware rate control off (`FRAME_RC_ENABLE=0`) and writes the
   I/P QP controls from `pic_init_qp` plus the first slice's delta. Iris
   sizes the coded queue from the current controls, so `configure` re-sets
@@ -308,11 +317,11 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding 
 - The running SM8550 module (kernel branch 7.2.6) exposes no
   `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`v4l2-ctl -d <encoder>
   --list-ctrls` shows the GOP size and the QP controls, no key-frame
-  request), which is why the intra period is the lever above and not a
-  control write of its own. The firmware has the property — 7.3-rc4's
-  `inst_fw_cap_sm8550_enc[]` lists `REQUEST_SYNC_FRAME` and
-  `iris_ctrls.c` maps the control onto it — so a kernel carrying that
-  commit removes the need for the lever.
+  request), which is why the intra period is the fallback lever above.
+  `packaging/kernel/0003-*` carries the upstream `REQUEST_SYNC_FRAME` commit
+  rebased onto that branch; a module built with it exposes the control and
+  the session uses it instead of the GOP move. Which one is in force is
+  visible in the trace: `encode idr lever=sync-frame|intra-period`.
 - Deblocking is a slice header property in VA and a per-context control in
   V4L2, so `configure_deblocking` reads the first slice and writes
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
@@ -498,6 +507,8 @@ encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
+encode idr lever=sync-frame|intra-period               (which requested-IDR
+                                                       lever this kernel has)
 encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues)
@@ -516,7 +527,7 @@ ends with a tag. Gates are commands, not opinions.
 | --- | --- | --- | --- |
 | 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
 | 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept (rebased onto `sheng-7.2.6` later; `packaging/kernel/`) | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
-| — | Kernel track, documented only: encoder loop-filter controls (`packaging/kernel/0002-*`, rebased and checked to apply on a pristine `sheng-7.2.6` tree) | Patch applies with `git am` and the six capabilities appear once in `inst_fw_cap_sm8550_enc`; **no hardware gate yet** — the controls have not been built into a module or exercised | (not tagged) |
+| — | Kernel track, documented only: encoder loop-filter controls (`packaging/kernel/0002-*`) and the encoder `REQUEST_SYNC_FRAME` control (`packaging/kernel/0003-*`), both rebased and checked to apply on a pristine `sheng-7.2.6` tree | Both patches apply with `git am`, the six DEBLOCK capabilities and the one `REQUEST_SYNC_FRAME` capability appear once in `inst_fw_cap_sm8550_enc`, and the module links (`iris_set_req_sync_frame` present, `BTI, PAC` note set); **no hardware gate yet** — neither has been loaded on the target, so `force_key_frame` has not been seen in `--list-ctrls` | (not tagged) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
 | 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome 152 acceptance; qualified 2026-10-22, see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
@@ -586,11 +597,12 @@ them).
     reference structure and chooses the quantisation, so none of them can be
     forwarded. Deblocking additionally cannot change inside a live context.
 14. An encode picture is a requested IDR only when the bitstream says so: the
-    node has no force-keyframe control, so the session pulls the intra period
-    to zero for that picture and puts it back before queueing it — restoring
-    after the completion made the following picture an IDR as well. The
-    lever is never skipped, because a driver-side guess at the firmware's own
-    GOP schedule dropped requests. `idr=1` in the trace is the request.
+    session uses `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when the kernel has
+    it, and otherwise pulls the intra period to zero for that picture and
+    puts it back before queueing it — restoring after the completion made
+    the following picture an IDR as well. The lever is never skipped,
+    because a driver-side guess at the firmware's own GOP schedule dropped
+    requests. `idr=1` in the trace is the request.
 15. An encode timestamp rises strictly: the session rate is fixed at
     configuration time and each picture advances by one frame duration. VA
     clients send the frame rate only with IDR pictures, and a timestamp

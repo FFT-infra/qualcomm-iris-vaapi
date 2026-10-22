@@ -56,11 +56,12 @@ entrypoint 的程序。
   `v4l-utils`（启动器按驱动名找解码节点，因为节点编号每次开机都会变）。
 - 任何能加载 libva 模块的 Linux 发行版。Fedora 44 是合格过的；提供 Fedora
   和 Arch 的打包。
-- 可选：来自 [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-  的三项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块滤波
-  控制项），已 rebase 后放在 [`packaging/kernel/`](packaging/kernel/README.md)，
-  附只重编模块的步骤。原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome
-  每帧多一次 GPU 拷贝，拿不到零拷贝；编码器上非默认的去块请求也会被拒绝。
+- 可选：四项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块
+  滤波控制项、编码器的 `REQUEST_SYNC_FRAME` 控制项），已 rebase 后放在
+  [`packaging/kernel/`](packaging/kernel/README.md)，附只重编模块的步骤。
+  原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome 每帧多一次 GPU 拷贝，
+  拿不到零拷贝；编码器上非默认的去块请求会被拒绝，按需 IDR 则改成挪 intra
+  period。
 
 ## 安装和使用
 
@@ -165,15 +166,16 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- **按需 IDR 是挪 GOP 挪出来的，靠的不是关键帧控制项。** 目标机跑的内核分支
+- **在 stock 内核上，按需 IDR 靠挪 GOP 实现。** 目标机跑的内核分支
   （7.2.6）没有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，所以客户端要 IDR 时，
   驱动把这一张图的 intra period 设成 0，并在这张图入队之前把周期改回去。
-  固件本身有这个能力：更新的内核树（7.3-rc4）在 SM8550 编码器能力表里列了
-  `REQUEST_SYNC_FRAME` 并把它接到这个控制项上，内核带上它之后就不需要挪周期。
-  `-force_key_frames` 配 `-c copy` 或者分段封装，切点就在它要的位置；下一个
-  自动 IDR 在这一次之后一个 GOP 处，而不是原来的排期上。每张请求 IDR 的图都要
-  多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。请求出来的 IDR 可以
-  当切点用：它带着固件上一次写出的 SPS/PPS（以及 SEI）。
+  固件本身有这个能力，`packaging/kernel/0003-*` 就是暴露它的上游
+  `REQUEST_SYNC_FRAME` 补丁；驱动会探测这个控制项，内核带了就直接用，不动
+  周期。没带补丁的内核上，`-force_key_frames` 配 `-c copy` 或者分段封装，
+  切点仍在它要的位置；下一个自动 IDR 在这一次之后一个 GOP 处，而不是原来的
+  排期上。每张请求 IDR 的图都要多写一次控制项，所以逐帧都请求反而比直接开
+  intra-only 贵。请求出来的 IDR 可以当切点用：它带着固件上一次写出的
+  SPS/PPS（以及 SEI）。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。
@@ -235,10 +237,11 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
   `src/` 里的 stateful Iris 实现、浏览器验收门禁和打包是本 fork 的工作。
 - `include/linux/` 内置的内核 UAPI 头文件带各自的 SPDX 标记
   （`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`）。
-- `packaging/kernel/` 携带 [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-  （Radxa，Xilin Wu）的三项 Iris 内核改动。它们改的是 GPL-2.0 的内核代码，
-  许可证也是 GPL-2.0，与驱动本身不同。HEVC 显式 RPS 的 slice 重写沿用了
-  同一项目的做法。
+- `packaging/kernel/` 用三个补丁携带四项 Iris 内核改动：三项来自
+  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)（Radxa，Xilin
+  Wu），一项是上游 `REQUEST_SYNC_FRAME` 提交的编码器部分（Wangao Wang，
+  高通）。它们改的是 GPL-2.0 的内核代码，许可证也是 GPL-2.0，与驱动本身
+  不同。HEVC 显式 RPS 的 slice 重写沿用了同一项目的做法。
 
 ## 环境变量
 

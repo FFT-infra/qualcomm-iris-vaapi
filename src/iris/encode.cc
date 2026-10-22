@@ -177,6 +177,13 @@ void EncoderSession::configure(
     // decodable from any IDR.
     if (!device_->set_control(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1))
         trace_("encode control missing name=prepend-spspps-to-idr");
+    // Which lever a requested IDR has is a property of the kernel, not of
+    // the picture: probe it once here so a requested IDR never discovers a
+    // missing control halfway through a stream. A kernel with the
+    // REQUEST_SYNC_FRAME capability takes the direct request; one without it
+    // gets the intra-period lever instead.
+    sync_frame_control_ = device_->set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0);
+    trace_("encode idr lever=%s", sync_frame_control_ ? "sync-frame" : "intra-period");
 
     // CAPTURE carries the frame rate the firmware rates against; OUTPUT
     // carries the operating rate, which only affects clocking. One rate is
@@ -370,16 +377,17 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
     apply_dynamic(params);
 
-    // The node exposes no V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME and the
-    // firmware capability list has no RAP control, so the intra period is the
-    // only lever that makes one picture an IDR: zero asks the firmware for an
-    // intra picture, and putting the period back restores the GOP. The lever
-    // is pulled for every requested picture, including one that would be an
-    // IDR anyway: skipping those made the driver's idea of the schedule drift
-    // from the firmware's and silently dropped requests. A stream that is
-    // intra-only needs no lever at all.
+    // A requested IDR has two possible levers. A kernel that carries the
+    // REQUEST_SYNC_FRAME capability exposes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME
+    // and that is the direct request. Kernel branch 7.2.6 does not, and there
+    // the intra period is the only one: zero asks the firmware for an intra
+    // picture and putting the period back restores the GOP. Either way the
+    // lever is pulled for every requested picture, including one that would
+    // be an IDR anyway: skipping those made the driver's idea of the schedule
+    // drift from the firmware's and silently dropped requests. A stream that
+    // is intra-only needs no lever at all.
     const bool force_idr = params.keyframe && params.gop_size != 0;
-    if (force_idr)
+    if (force_idr && !sync_frame_control_)
         set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 0, "gop size");
 
     // The device layer takes microseconds and the encoder echoes the value
@@ -404,8 +412,12 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     // queued, not after its completion: the firmware schedules the next GOP
     // boundary from the period it sees, so restoring afterwards made the
     // picture after a requested one an IDR as well.
-    if (force_idr)
+    if (force_idr && !sync_frame_control_)
         set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
+    // The direct request. The kernel takes it as a one-shot on the next
+    // picture, so it needs no restore.
+    if (force_idr && sync_frame_control_)
+        set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0, "force key frame");
     // bytesused must be non-zero: vb2 rejects a zero-length raw buffer and
     // poisons the instance.
     device_->queue_buffer_dmabuf(Queue::Output, index, dmabuf_fd, dmabuf_length, dmabuf_length, timestamp_us, 0);

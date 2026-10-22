@@ -69,8 +69,14 @@ constexpr uint32_t kPayload = 1024;
 
 class FakeEncoderNode final : public iris::Device {
 public:
-    explicit FakeEncoderNode(bool loop_filter_controls)
+    // `sync_frame_control` models a kernel that carries REQUEST_SYNC_FRAME
+    // and therefore exposes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME; without it
+    // the node is the running 7.2.6 shape, where the intra period is the
+    // only way to request an IDR.
+    explicit FakeEncoderNode(bool loop_filter_controls, bool sync_frame_control = false)
     {
+        if (sync_frame_control)
+            known_.insert(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
         for (uint32_t id : { V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_CID_MPEG_VIDEO_H264_LEVEL,
                  V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE, V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
                  V4L2_CID_MPEG_VIDEO_HEVC_LEVEL, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
@@ -552,6 +558,47 @@ void test_on_demand_idr()
     session.finish();
 }
 
+// A kernel carrying REQUEST_SYNC_FRAME exposes the direct control, and then
+// the intra period is left alone: moving it would change the schedule the
+// client asked for.
+void test_on_demand_idr_by_sync_frame()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true, true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1, "configure");
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    const unsigned gop_writes = raw->writes(V4L2_CID_MPEG_VIDEO_GOP_SIZE);
+    // configure() probes the control once, so count writes, not presence.
+    const unsigned probe = raw->writes(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
+
+    check(session.encode(fd, kCaptureSlot, params(0, 0, 0)).bytes.size() == kPayload, "a regular picture");
+    check(raw->writes(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME) == probe,
+        "a regular picture does not request a sync frame");
+
+    iris::EncodeParams key = params(0, 0, 0);
+    key.keyframe = true;
+    check(session.encode(fd, kCaptureSlot, key).bytes.size() == kPayload, "the requested picture");
+    check(raw->writes(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME) == probe + 1,
+        "the requested picture uses the direct control");
+    check(raw->writes(V4L2_CID_MPEG_VIDEO_GOP_SIZE) == gop_writes,
+        "the intra period is untouched when the direct control exists");
+
+    // The direct request is a one-shot on the kernel side, so the picture
+    // after it must not ask again.
+    const unsigned sync_writes = raw->writes(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
+    check(session.encode(fd, kCaptureSlot, params(0, 0, 0)).bytes.size() == kPayload, "the next picture");
+    check(raw->writes(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME) == sync_writes,
+        "the request is not repeated for the next picture");
+    session.finish();
+}
+
 // The point of the split: with the firmware holding completions, several
 // pictures are in flight at once and each ticket still gets its own access
 // unit. A synchronous session could not get past the first submit.
@@ -633,6 +680,7 @@ int main()
     test_change_needs_a_new_context();
     test_timestamps_never_go_backwards();
     test_on_demand_idr();
+    test_on_demand_idr_by_sync_frame();
     test_pipelined_pictures();
     test_drain_resolves_outstanding_pictures();
     if (failures) {

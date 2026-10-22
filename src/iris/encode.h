@@ -131,6 +131,10 @@ private:
     bool finished_ = false;
     bool cold_ = true;
     bool healthy_ = true;
+    // The node takes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME (a kernel with the
+    // REQUEST_SYNC_FRAME capability). False means the intra period is the
+    // only lever a requested IDR has.
+    bool sync_frame_control_ = false;
     // The firmware answered the drain marker (V4L2_ENC_CMD_STOP).
     bool drained_ = false;
     EncodeParams applied_;
