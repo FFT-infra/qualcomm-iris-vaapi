@@ -2822,3 +2822,40 @@ directory per row above, each with `summary.json`, `cdp.json`,
 were run under a scratch lab root, `/tmp/iris-bench/av110-va.md5` and
 `av110-sw.md5` for the frame MD5s, and
 `~/iris-vaapi-lab/media/10bit/av1-640x360-10bit.mp4` for the clip.
+
+## VP9 conformance through the driver, first full suite (2026-10-22)
+
+Same build and boot as the section above. `FFmpeg-VP9-VAAPI` over the whole
+`VP9-TEST-VECTORS` corpus, one vector at a time, 20 s per vector:
+
+| Total | Passed | Fail | Crash | Timeout |
+| ---: | ---: | ---: | ---: | ---: |
+| 305 | 175 | 36 | 67 | 27 |
+
+Every non-pass falls into one of five families, and the driver trace
+explains three of them:
+
+- **64 × `vp90-2-02` tiny dimensions, below the advertised 96x96.** FFmpeg
+  refuses before any VA call: `Hardware does not support image size 8x8
+  (constraints: width 96-8192 height 96-8192)`. The bounds come from the
+  kernel's CAPTURE enumeration, so these vectors cannot reach this driver on
+  this SoC. Checked on 08x08 and 66x66.
+- **36 × `vp90-2-14` dynamic resize with frame-parallel tiles, content
+  mismatch.** The frames decode (the trace shows two sessions, 432x240 then
+  896x480, and every submitted picture completes) but the MD5s differ from
+  `libvpx-vp9`. Not classified further here.
+- **24 × `vp90-2-21` timeouts** at the 20 s bound, and **3 more** in the
+  `05`/`18`/`22` vectors.
+- **`vp90-2-10-show-existing-frame`** and **`vp90-2-16-intra-only`** crash;
+  the first is the case the translator refuses by design
+  (`show_existing_frame` must reuse the VA surface).
+- **`vp91-2-04-yuv444`** crashes; 4:4:4 is outside the advertised profiles.
+
+This is a driver-path number, not comparable one-for-one with the
+firmware-path `GStreamer-*-V4L2` table above (235/305): the Fluster FFmpeg
+wrapper decodes through a different client stack. It is the first full run
+of this suite through the driver and replaces the three-vector probe that
+was recorded earlier.
+
+Artifact: `/tmp/iris-bench/vp9-va.md` on the target (per-vector marks), plus
+`vp9res-va.md5` / `vp9res-sw.md5` for the resize vector above.
