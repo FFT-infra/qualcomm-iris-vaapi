@@ -2904,3 +2904,74 @@ is recorded as observed rather than attributed.
 Artifacts: `/tmp/iris-bench/lab-import/{h264,sintel-1080p30-hevc-b3,
 sintel-1080p30-hevc10,sintel-1080p30-vp9,hw-av1}/` on the target
 (`browser.log`, `cdp.json`, `summary.json`).
+
+## Browser playback on real sites, and an alt-ref regression it caught (2026-10-23)
+
+The install gate ran with the build-tree driver only; the browser matrix after
+the install covered local clips. This run adds the missing client: plain
+`google-chrome` (no environment, resolving the driver through the
+`msm_drv_video.so` alias) playing YouTube and Bilibili, with the driver trace
+on.
+
+### Install
+
+`install-system.sh build-def` over the 2026-09-22 package (`1d15de2`,
+`df16127c…`). Manifest: source `166eb01`, artifact `33fff189…`, the previous
+driver kept at `/usr/local/share/iris-vaapi/backup/`. `vainfo` with no
+environment lists `VAProfileAV1Profile0` through the alias. Kernel
+`7.2.6-sm8550-g42f3b40-iris1` with all four patches, boot
+`90008d1c-4049…`.
+
+| Site | Codec, size | Decoder | Frames / dropped | Per-frame policy |
+| --- | --- | --- | --- | --- |
+| YouTube `aqz-KE-bpKQ` | AV1 854x480 | `VaapiVideoDecoder`, platform | 600 / 0 | `copy-gpu` ×806 |
+| Bilibili `BV1GJ411x7h7` | HEVC Main 640x360 | `VaapiVideoDecoder`, platform | 500 / 0 | `import` ×832 |
+
+### The VP9 regression
+
+The four-video YouTube sweep hit a VP9 clip (`LXb3EKWsInQ`, adaptive, mostly
+854x480) where every session logged dozens of
+`capture token=… flags=0x4041 publish=error` lines, each followed by a
+same-token `publish=drop`: 50 errors / 50 drops per session, reproduced. The
+same clip through the previous install (build `df16127c…`, which predates
+`8dd655e`) shows none: 1080 `copy-gpu`, one drop.
+
+The mechanism: a VP9 alt-ref access unit is one VA picture the firmware
+decodes as two completions under one token — the invisible frame first
+(ERROR, no picture-type bit, no payload), the visible frame immediately
+after. `8dd655e` fails a timestamped error completion at once; on the 0004
+module the invisible completion carries its timestamp, so every alt-ref
+failed its target and the real frame behind it was dropped as unnamed. The
+session unit test now scripts this two-completion shape
+(`test_vp9_altref_superframe_is_one_picture`), and the fix keeps a
+completion that has no picture-type bit and no payload pending until the
+next one publishes it. A real corrupt picture carries a picture-type bit
+(the truncated HEVC here came back `0x4049`, ERROR|KEYFRAME) and still fails
+at once; that shape is asserted by the existing corrupt test, now fed with
+`V4L2_BUF_FLAG_KEYFRAME`.
+
+After the fix (`66a6a98`, installed): the same VP9 clip logs
+`publish=invisible` ×118 and zero errors; the decode matrix passes
+unchanged (VP9 `48/48` frame-MD5). Committed as `97dde61`.
+
+### Where the fix was verified
+
+| Run | Driver | VP9 854x480, `LXb3EKWsInQ` |
+| --- | --- | --- |
+| before | `build 2b860ea8` (= `821c9f2`) | 26 drops in Chrome, 8 token-less errors |
+| before | installed `df16127c…` (pre-`8dd655e`) | 1080 `copy-gpu`, 1 drop, Chrome 600/0 |
+| after | installed `66a6a98` | 118 `publish=invisible`, 0 errors, Chrome 995/6 |
+
+### The AV1 observation, still open
+
+One `yt-music` run served an AV1 1280x720 rendition whose session logged 136
+`publish=error` completions (`0x4051` PFRAME|ERROR ×129, `0x4049` ×7), in
+consecutive-token pairs, while Chrome reported 501 frames / 0 dropped. Three
+later runs at 854x480 and 1080p show zero errors, and the pre-fix tree at
+854x480 shows the same class as 8 token-less `0x4041` errors. The video
+plays; nothing is attributed to the fix. It is recorded as an open
+rendition-dependent observation, not a conclusion.
+
+Scratch artifacts: `~/Lab/Bridge/tmp/iris-bench/` on the target
+(`site/ab-*/browser.log` per run, `vp9alt/` for the local alt-ref probes,
+`olddrv/` for the previous driver).
