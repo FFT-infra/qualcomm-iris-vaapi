@@ -56,12 +56,12 @@ entrypoint 的程序。
   `v4l-utils`（启动器按驱动名找解码节点，因为节点编号每次开机都会变）。
 - 任何能加载 libva 模块的 Linux 发行版。Fedora 44 是合格过的；提供 Fedora
   和 Arch 的打包。
-- 可选：四项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块
-  滤波控制项、编码器的 `REQUEST_SYNC_FRAME` 控制项），已 rebase 后放在
-  [`packaging/kernel/`](packaging/kernel/README.md)，附只重编模块的步骤。
-  原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome 每帧多一次 GPU 拷贝，
-  拿不到零拷贝；编码器上非默认的去块请求会被拒绝，按需 IDR 则改成挪 intra
-  period。
+- 可选：五项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块
+  滤波控制项、编码器的 `REQUEST_SYNC_FRAME` 控制项、出错完成保留时间戳），已
+  rebase 后放在 [`packaging/kernel/`](packaging/kernel/README.md)，附只重编模块
+  的步骤。原版内核上驱动会探测到补丁不在，照样能用，只是 Chrome 每帧多一次
+  GPU 拷贝，拿不到零拷贝；编码器上非默认的去块请求会被拒绝，按需 IDR 则改成
+  挪 intra period；损坏的画面要等一次排空或同步超时才报错，而不是当场报错。
 
 ## 安装和使用
 
@@ -235,7 +235,7 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
   `src/` 里的 stateful Iris 实现、浏览器验收门禁和打包是本 fork 的工作。
 - `include/linux/` 内置的内核 UAPI 头文件带各自的 SPDX 标记
   （`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`）。
-- `packaging/kernel/` 用三个补丁携带四项 Iris 内核改动：三项来自
+- `packaging/kernel/` 用四个补丁携带五项 Iris 内核改动：四项来自
   [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)（Radxa，Xilin
   Wu），一项是上游 `REQUEST_SYNC_FRAME` 提交的编码器部分（Wangao Wang，
   高通）。它们改的是 GPL-2.0 的内核代码，许可证也是 GPL-2.0，与驱动本身

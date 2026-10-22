@@ -63,15 +63,16 @@ geometry. A VA context that only returns bytes proves nothing.
   because the number moves between boots).
 - Any Linux distribution that can load a libva module. Fedora 44 is the
   qualified one; Fedora and Arch packaging is provided.
-- Optionally, four Iris kernel changes (decode-order output, a 64-buffer
-  CAPTURE pool, the encoder loop-filter controls and the encoder's
-  `REQUEST_SYNC_FRAME` control) carried rebased in
-  [`packaging/kernel/`](packaging/kernel/README.md) with a module-only build
-  recipe. On a stock kernel the driver detects their absence and still works;
-  Chrome then gets a GPU copy per frame instead of the zero-copy path, an
-  encoder deblocking request other than the firmware default is refused, and
-  a requested IDR moves the intra period instead of asking firmware for a
-  sync frame.
+- Optionally, five Iris kernel changes (decode-order output, a 64-buffer
+  CAPTURE pool, the encoder loop-filter controls, the encoder's
+  `REQUEST_SYNC_FRAME` control and a timestamp on error completions) carried
+  rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
+  module-only build recipe. On a stock kernel the driver detects their
+  absence and still works; Chrome then gets a GPU copy per frame instead of
+  the zero-copy path, an encoder deblocking request other than the firmware
+  default is refused, a requested IDR moves the intra period instead of
+  asking firmware for a sync frame, and a corrupt picture is reported only
+  after a drain or a sync timeout instead of at once.
 
 ## Install and use
 
@@ -277,8 +278,8 @@ MIT with LGPL-2.1-covered parts, the same terms as upstream; see `COPYING`,
   the browser acceptance gates and the packaging are this fork's work.
 - `include/linux/` vendors the kernel UAPI headers under their own SPDX tag
   (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
-- `packaging/kernel/` carries four Iris kernel changes in three patches:
-  three from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
+- `packaging/kernel/` carries five Iris kernel changes in four patches:
+  four from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
   (Radxa, Xilin Wu) and the encoder half of an upstream `REQUEST_SYNC_FRAME`
   commit (Wangao Wang, Qualcomm). They touch GPL-2.0 kernel code and carry
   that license, not the driver's. The explicit-RPS HEVC slice rewrite follows

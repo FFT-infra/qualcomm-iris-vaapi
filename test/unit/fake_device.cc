@@ -381,6 +381,22 @@ void FakeDevice::complete_one()
         marker.bytesused = 0;
         capture_done_.push_back(marker);
     }
+    if (timestamped_errors_ > 0 && !capture_queue_.empty()) {
+        // A kernel with packaging/kernel/0004-* keeps the firmware timestamp
+        // on an error completion, so the client can name the failed picture.
+        --timestamped_errors_;
+        const unsigned slot = capture_queue_.front();
+        capture_queue_.pop_front();
+        Dequeued corrupt;
+        corrupt.index = slot;
+        corrupt.flags = V4L2_BUF_FLAG_ERROR | timestamped_error_flags_;
+        corrupt.timestamp_us = au.timestamp;
+        corrupt.bytesused = 0;
+        capture_done_.push_back(corrupt);
+        output_done_.push_back(au.index);
+        output_done_flags_.push_back(0);
+        return;
+    }
     if (config_.display_order_reorder && !stopped_) {
         // Hold this picture: display-order firmware withholds a decoded
         // picture until later input arrives. Release the oldest held one

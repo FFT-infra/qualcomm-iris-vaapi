@@ -2358,3 +2358,118 @@ Iris IRQ delta over the IDR and segment runs: 1829.
 stock `.zst` (`4e29b74d…`), the new module, the target `Module.symvers` and
 `stock.sha256`. `rollback.sh` restores the stock `.zst` and re-runs
 `depmod`; a reboot is required either way.
+
+## AV1 film grain: refused at the VA layer, before hardware (2026-10-22)
+
+Source `97ebadd` plus the working-tree change that adds the timestamped-error
+branch, driver build tree only, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`8a7cc414-751d-44ec-8e20-fe89dd676ab6`.
+
+### What was asked
+
+AV1 film grain synthesis is the one decode feature the translator still
+refuses. This run establishes where the refusal happens, and whether the
+firmware would honour the parameters if it were passed through.
+
+### The stream
+
+`ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -frames:v 60 -c:v
+libaom-av1 -cpu-used 8 -crf 40 -aom-params film-grain-test=8`, 275 694
+bytes, 60 frames. A software decode writes 60 frame MD5s
+(`av1-grain-roundtrip/grain-sw.md5`).
+
+### The refusal
+
+`ffmpeg -hwaccel vaapi … -vf hwdownload,format=nv12,format=yuv420p` fails
+with `endPicture: film grain parameters are not reconstructed`
+(`VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE`, status 15). The trace shows the
+first picture submitted and `va end_picture ctx=6 surface=7 deferred`, then
+the second picture rejected at `endPicture`. No Iris session ever sees a
+picture with grain parameters, so this is the translator's check in
+`src/codec/av1_obu.cc` (`apply_grain`), not a firmware capability result.
+The hardware comparison file is empty (0 of 60 frames).
+
+### Why the check is there
+
+The driver rebuilds the AV1 frame header from VA decode parameters rather
+than forwarding the client's bitstream. `VAFilmGrainStructAV1` carries the
+synthesis parameters, so the header could be rebuilt with them, but the
+kernel would not act on them: `FILM_GRAIN` is a `CAP_FLAG_VOLATILE`
+capability whose value the kernel takes from the firmware's
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` reply (`iris_hfi_gen2_response.c`) and
+sends back at `streamon`. There is no V4L2 control that sets it from
+userspace, so the value is whatever the firmware reported — on this node, 0.
+Advertising grain support would promise a picture the firmware will not
+produce.
+
+### What is not evidence
+
+This run does not show the firmware failing to apply grain, because no
+stream with grain ever reached it. A negative firmware result needs the
+kernel-side control described in `docs/architecture.md` §1, and that is a
+separate change with its own hardware gate.
+
+### Artifacts
+
+`~/Lab/iris-vaapi-lab/artifacts/av1-grain-roundtrip/` on the target:
+`source.webm`, `grain-sw.md5` (60 frames), `grain-va.md5` (empty), and
+`grain-va.log` with the trace above.
+
+## Corrupt HEVC: the firmware's error buffer names nothing (2026-10-22)
+
+Same build and boot as the film-grain record above. The target runs the
+module built from 0001–0003, which does **not** carry the error-timestamp
+patch; this run is the evidence for adding it.
+
+### Provoking a corrupt frame
+
+Four attempts on `sintel-1080p30-hevc-b3.mp4` (720 frames, HEVC, 25 184 804
+bytes), all decoded with `-hwaccel vaapi -hwaccel_output_format vaapi`:
+
+| Damage | Result |
+| --- | --- |
+| 4 KiB flipped at 60 % of the file | 699/699 frames, `errors=0` |
+| 64 KiB zeroed at 60 % | 699/699, `errors=0` |
+| 40 slice payloads zeroed | 652/652, `errors=0` |
+| 40 slice headers overwritten | 652/652, `errors=0` |
+| stream cut mid-NAL at the 100th picture | 178/179, `errors=2` |
+
+The firmware conceals damage inside slice data and reports nothing, so only
+the truncation produced an error completion.
+
+### What the driver saw
+
+```
+submit token=179 bytes=381 output=0
+va destroy_context id=6 pending=2
+drain begin reason=finish pending=2
+capture token=178 index=13 flags=0x4021 publish=direct
+capture error index=4 flags=0x4049
+capture empty index=14 flags=0x104001 last=1
+drain lost token=179
+session finish submitted=179 completed=178 errors=2 drops=0 timeouts=0
+```
+
+`0x4049` is ERROR | KEYFRAME | PFRAME: the firmware flagged the picture, but
+the kernel zeroed the timestamp (`iris_buffer.c`, the ERROR branch of
+`iris_vb2_buffer_done()`), so the completion carried no token. The driver
+counted it as a marker and left the target pending; only the drain at end of
+stream failed it, as `drain lost`. A client that syncs that surface before
+submitting more input waits out the sync bound and gets `TIMEDOUT`, not
+`DECODING_ERROR`.
+
+### Fix and its coverage
+
+`packaging/kernel/0004-media-iris-preserve-timestamps-on-error-buffers.patch`
+(strongtz, Xilin Wu) copies `buf->timestamp` onto the error completion, and
+`Session::handle_capture_returns` now fails the matching target as soon as
+the completion is dequeued. `meson test` covers both shapes: a timestamped
+corrupt completion fails its surface without a drain, and a timestamped
+hidden AV1 picture is still published. On the old driver the first test
+reports `wrong status 38 (surface sync timeout)`.
+
+### What is not evidence
+
+The patch has **not been built or loaded on the target**. This record shows
+the failure mode it fixes, not the fixed behavior on hardware; that needs a
+module rebuild from all four patches and the truncation clip above.

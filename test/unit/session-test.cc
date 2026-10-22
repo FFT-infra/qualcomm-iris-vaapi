@@ -268,6 +268,54 @@ void test_output_error_fails_target()
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
+void test_timestamped_corrupt_completion_fails_target_at_once()
+{
+    // With packaging/kernel/0004-* an error completion keeps its timestamp,
+    // so the failed picture is named and its surface fails on the spot. The
+    // stock behavior — no token, wait for the drain — is covered by
+    // test_firmware_error_marker_is_never_published.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(!b.pending && b.error);
+    CHECK(h.session->stats().errors == 1);
+    // The target is failed before any drain: a wait reports the decode error,
+    // not a timeout, and no STOP was needed to get there.
+    CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
+    CHECK(!log_has(*h.fake, "DECODER_CMD STOP"));
+}
+
+void test_timestamped_hidden_picture_is_published_not_failed()
+{
+    // An AV1 alt-ref is a decoded picture the stream never shows. It carries
+    // the ERROR flag, no picture-type bit and no payload. On a kernel with
+    // 0004 it also carries its timestamp, and it must still be published
+    // rather than failed.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    b.hidden = true;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+}
+
 void test_eio_fails_session_and_all_pending()
 {
     Harness h;
@@ -678,6 +726,9 @@ int main()
         { "reuse of pending target invalidates old token", test_reuse_pending_target_invalidates_old_token },
         { "firmware error marker is never published", test_firmware_error_marker_is_never_published },
         { "output error fails target", test_output_error_fails_target },
+        { "timestamped corrupt completion fails target at once",
+            test_timestamped_corrupt_completion_fails_target_at_once },
+        { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },

@@ -501,6 +501,9 @@ bool Session::handle_capture_returns()
             last = true;
             saw_last_ = true;
         }
+        constexpr uint32_t picture
+            = V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME;
+        const bool noshow_shape = !(returned->flags & picture) && !payload;
         if (returned->error() && returned->timestamp_us == 0) {
             // A picture the firmware decoded but does not show (an AV1
             // alt-ref) comes back with V4L2_BUF_FLAG_ERROR, no picture-type
@@ -511,10 +514,8 @@ bool Session::handle_capture_returns()
             // follow decode order, so it belongs to the oldest target
             // submitted as hidden. Anything else is a real failure marker
             // with no token it could be trusted against.
-            constexpr uint32_t picture
-                = V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME;
             auto hidden = pending_.end();
-            if (!(returned->flags & picture)) {
+            if (noshow_shape) {
                 for (auto it = pending_.begin(); it != pending_.end(); ++it) {
                     if (it->second->hidden) {
                         hidden = it;
@@ -540,6 +541,37 @@ bool Session::handle_capture_returns()
             trace_("capture error index=%u flags=%#x", returned->index, returned->flags);
             continue;
         }
+        if (returned->error()) {
+            // A kernel carrying packaging/kernel/0004-* keeps the firmware's
+            // timestamp on an error completion, which names the picture. A
+            // hidden picture still has no picture-type bit and no payload and
+            // is published; anything else failed to decode and fails its own
+            // target here, without waiting for a drain. This runs before the
+            // payload check below because an error completion carries none.
+            auto it = pending_.find(returned->timestamp_us);
+            if (it == pending_.end()) {
+                ++stats_.errors;
+                trace_("capture error index=%u flags=%#x token=%llu publish=drop", returned->index,
+                    returned->flags, static_cast<unsigned long long>(returned->timestamp_us));
+                continue;
+            }
+            Target& target = *it->second;
+            pending_.erase(it);
+            target.pending = false;
+            if (noshow_shape && target.hidden) {
+                frame->layout().data_offset = returned->data_offset;
+                publish(target, frame, *returned, "capture noshow");
+                cold_ = false;
+                ++stats_.completed;
+                ++progress_;
+                continue;
+            }
+            target.error = true;
+            ++stats_.errors;
+            trace_("capture token=%llu index=%u flags=%#x publish=error",
+                static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
+            continue;
+        }
         if (!payload) {
             trace_("capture empty index=%u flags=%#x last=%d", returned->index, returned->flags, last ? 1 : 0);
             if (last)
@@ -557,14 +589,6 @@ bool Session::handle_capture_returns()
         }
         Target& target = *it->second;
         pending_.erase(it);
-        if (returned->error()) {
-            target.pending = false;
-            target.error = true;
-            ++stats_.errors;
-            trace_("capture token=%llu index=%u flags=%#x publish=error",
-                static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
-            continue;
-        }
         if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
             // The firmware wrote this picture into a buffer queued for a
             // different token. Neither surface can be trusted: the one this

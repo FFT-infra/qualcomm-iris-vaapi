@@ -52,6 +52,14 @@ public:
     void inject_output_errors(unsigned count) { output_errors_ = count; }
     // Emit N firmware error markers (ERROR flag, timestamp 0) on CAPTURE.
     void inject_error_markers(unsigned count) { error_markers_ = count; }
+    // Emit N corrupt completions that keep their timestamp, as a kernel with
+    // packaging/kernel/0004-* does. An optional picture-type flag lets a test
+    // model the AV1 hidden (show_frame=0) shape.
+    void inject_timestamped_errors(unsigned count, uint32_t extra_flags = 0)
+    {
+        timestamped_errors_ = count;
+        timestamped_error_flags_ = extra_flags;
+    }
     // Return EBUSY from START this many times.
     void inject_start_busy(unsigned count) { start_busy_ = count; }
     // After the next AU, announce a new resolution.
@@ -157,6 +165,8 @@ private:
     bool stalled_ = false;
     bool drc_blocked_ = false; // new-resolution AU waits for CAPTURE restart
     unsigned output_errors_ = 0, error_markers_ = 0, start_busy_ = 0;
+    unsigned timestamped_errors_ = 0;
+    uint32_t timestamped_error_flags_ = 0;
     std::optional<std::pair<unsigned, unsigned>> pending_drc_;
     bool capture_eio_ = false;
     bool auto_tick_ = true;

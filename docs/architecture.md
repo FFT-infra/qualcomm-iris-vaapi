@@ -42,7 +42,7 @@ with a self-built kernel from `ianchb/sm8550-mainline` (Iris is the
 `qcom-iris` module, HFI gen2). Because the kernel is self-built, kernel-side
 fixes are in scope.
 
-Four Iris kernel changes are adopted as part of the target. The first two
+Five Iris kernel changes are adopted as part of the target. The first two
 were first applied to a `sheng-7.2.2` tree; after the target moved to
 `kernel-sheng-7.2.6-1` the rebased patches and the module-only build recipe
 live in `packaging/kernel/`:
@@ -53,12 +53,17 @@ live in `packaging/kernel/`:
 | CAPTURE pool up to 64 buffers | Raises the vb2 `max_num_buffers` for the gen2 decoder CAPTURE queue | Threaded VA clients keep more than 32 surfaces; a driver-owned pool needs headroom above the client's pool. |
 | encoder loop-filter controls | Exposes `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` and the HEVC equivalents, sent as `HFI_PROP_DEBLOCKING_MODE` | VA carries deblocking per slice (mode, alpha, beta); the stock kernel has no control to carry it to the firmware, so a non-default request is refused instead of being silently ignored. |
 | encoder `REQUEST_SYNC_FRAME` | Exposes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, sent as `HFI_PROP_REQUEST_SYNC_FRAME` with the sequence-header mode from `PREPEND_SPSPPS_TO_IDR` | Without it a requested IDR is produced by moving the intra period, which costs two control writes per request and leaves the parameter sets for the driver to prefix. |
+| timestamp on error completions | `iris_vb2_buffer_done()` copies `buf->timestamp` onto a `V4L2_BUF_FLAG_ERROR` CAPTURE completion instead of zeroing it | The CAPTURE timestamp is the token that names the picture. Zeroed, a corrupt picture cannot be attributed: the target stays pending until a drain or the sync bound, and the client sees `TIMEDOUT` rather than `DECODING_ERROR`. |
 
-The last two are documented and rebased but **not qualified**: the controls
-have not been exercised on hardware, so the driver keeps its refusal path for
-deblocking and its intra-period lever for a requested IDR, and
-TEST-RESULTS.md has no run that shows a non-default filter reaching the
-firmware or a `force_key_frame` write reaching a loaded module.
+The target runs a module built from all four patches
+(`TEST-RESULTS.md`, `REQUEST_SYNC_FRAME` on the target). The driver still
+detects each control and falls back when it is absent, so a stock module
+keeps working: display order with the drain fallback, deblocking refused,
+the intra-period lever, and an error completion reported at the drain.
+On a kernel without the timestamp patch the error branch is reachable only
+through the zero-timestamp path, which is also how an AV1 hidden picture
+arrives; the driver therefore decides from the picture-type bits and the
+payload rather than from the timestamp alone.
 
 The driver **must not require** any of these. It probes for the display-delay
 control at session open and runs in one of two session modes:
@@ -465,15 +470,20 @@ capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mm
 capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
 capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
                                                                      (AV1 hidden picture: the node
-                                                                      returns it with no pixels and
-                                                                      a zero timestamp; attributed by
-                                                                      decode order, still published)
+                                                                      returns it with no pixels, no
+                                                                      picture-type bit and no payload;
+                                                                      published, attributed by its
+                                                                      timestamp when the kernel keeps
+                                                                      one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
 capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
                                                                      (Import: buffer was queued for
                                                                       another token; both surfaces fail)
-capture error index=<i> flags=<hex>                                  (error marker, no token)
+capture error index=<i> flags=<hex>                                  (error marker with no token; a
+                                                                      stock kernel zeroes the timestamp)
+capture error index=<i> flags=<hex> token=<n> publish=drop            (timestamped error whose token
+                                                                      is no longer pending)
 capture empty index=<i> flags=<hex> last=0|1
 capture last
 capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
@@ -528,7 +538,7 @@ ends with a tag. Gates are commands, not opinions.
 | --- | --- | --- | --- |
 | 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
 | 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept (rebased onto `sheng-7.2.6` later; `packaging/kernel/`) | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
-| — | Kernel track, documented only: encoder loop-filter controls (`packaging/kernel/0002-*`) and the encoder `REQUEST_SYNC_FRAME` control (`packaging/kernel/0003-*`), both rebased and checked to apply on a pristine `sheng-7.2.6` tree | Both patches apply with `git am`, the six DEBLOCK capabilities and the one `REQUEST_SYNC_FRAME` capability appear once in `inst_fw_cap_sm8550_enc`, and the module links (`iris_set_req_sync_frame` present, `BTI, PAC` note set); **no hardware gate yet** — neither has been loaded on the target, so `force_key_frame` has not been seen in `--list-ctrls` | (not tagged) |
+| — | Kernel track: encoder loop-filter controls (`packaging/kernel/0002-*`), the encoder `REQUEST_SYNC_FRAME` control (`packaging/kernel/0003-*`) and error-completion timestamps (`packaging/kernel/0004-*`), all rebased onto `sheng-7.2.6` | 0002/0003: the six DEBLOCK and one `REQUEST_SYNC_FRAME` capability appear once in `inst_fw_cap_sm8550_enc`, `force_key_frame` is listed by `--list-ctrls` on the loaded module, `encode idr lever=sync-frame`, and the IDR/segment/pipelining runs in `TEST-RESULTS.md` match the GOP record. 0004: applies with `git am` on top of the other three and `meson test` covers both the timestamped-error and the timestamped-hidden paths; **not built or loaded on the target yet** | (not tagged) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
 | 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome 152 acceptance; qualified 2026-10-22, see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
@@ -564,6 +574,8 @@ them).
    published; `DECODING_ERROR` if the firmware flagged it; `TIMEDOUT` after
    the bound (decode-order) or after drain still leaves it pending
    (display-order). Never returns `SUCCESS` for pixels that are not there.
+   A timestamped error completion fails its surface as soon as it is
+   dequeued, so `DECODING_ERROR` does not wait for the bound.
 5. No VA entry point sleeps while holding `Driver::mutex`.
 6. The node is found by `iris_driver` name and decoder capability; a fixed
    `/dev/videoN` appears nowhere in code, launcher or packaging.
@@ -571,6 +583,8 @@ them).
 8. A firmware error marker (ERROR flag, zero timestamp, or empty payload)
    is never published, with one exception: the node returns an AV1 hidden
    picture exactly that way, and invariant 18 is what tells them apart.
+   With the error-timestamp patch a marker keeps its token and fails that
+   surface immediately; the token-less form is the stock kernel's.
 9. Import keeps exactly one client buffer with the firmware at a time, and
    every submitted picture gets its buffer even after its surface was
    released; a completion whose token does not match its buffer's token
@@ -625,10 +639,13 @@ them).
     `VA_STATUS_ERROR_OPERATION_FAILED` instead of decoding against slots
     nobody can name.
 18. An AV1 hidden picture (`show_frame=0`) is published, not failed. The node
-    returns it with the ERROR flag, a zero timestamp, no KEYFRAME/PFRAME/
-    BFRAME bit and zero bytes used; only the oldest pending target whose
-    `Target::hidden` is set may take it, so an alt-ref can never land on a
-    shown picture's surface.
+    returns it with the ERROR flag, no KEYFRAME/PFRAME/BFRAME bit and zero
+    bytes used. On a stock kernel it also has a zero timestamp and only the
+    oldest pending target whose `Target::hidden` is set may take it; on a
+    kernel with the error-timestamp patch it carries its own token, which
+    must match a pending hidden target. Either way an alt-ref can never land
+    on a shown picture's surface, and a corrupt shown picture is never
+    published as a hidden one.
 
 ## 11. How work is divided
 
