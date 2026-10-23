@@ -64,6 +64,15 @@ hevc_parameter_sets_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('hevc-parameter-sets', hevc_parameter_sets_test)
 
+# The rebuilt AV1 frame header walked back with a spec-ordered reader: the
+# fields whose coding is not a plain copy of the VA value. No hardware.
+av1_obu_test = executable(
+  'av1-obu-test',
+  'av1-obu-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-obu', av1_obu_test)
+
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(
   'encode-params-test',

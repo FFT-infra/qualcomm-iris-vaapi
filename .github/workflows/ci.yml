@@ -38,6 +38,7 @@ jobs:
             session \
             annexb \
             hevc-parameter-sets \
+            av1-obu \
             encode-params \
             encode-session \
             prime-import \
