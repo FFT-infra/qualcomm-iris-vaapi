@@ -3223,5 +3223,99 @@ stays **unqualified**. `data/iris-codec-capabilities.json` and
 `~/Lab/Bridge/tmp/iris-bench/av1-720/` (`out-a.log` success, `out-b.log`
 failure, `gst.strace`, `flag-a.log`, `dd-c.dmesg`).
 
+### The installed package, no environment overrides (2026-10-24)
+
+The same commit installed with `scripts/install-system.sh build-def`
+(`source_commit=434be71`, `source_dirty=0`,
+`artifact_sha256=f155e2f5…`), then run with `LIBVA_DRIVER_NAME`,
+`LIBVA_DRIVERS_PATH` and `V4L2_VA_TRACE` all absent from the environment:
+
+```
+libva info: Trying to open /usr/lib64/dri/msm_drv_video.so
+vainfo: Driver version: Qualcomm Iris V4L2 stateful (libva-v4l2)
+      VAProfileH264Main : VAEntrypointVLD
+      VAProfileH264Main : VAEntrypointEncSlice
+session open node=/dev/video2 mode=decode-order codec=AV01 854x480 au=7077888 output=4
+session finish submitted=42 completed=42 errors=0 drops=0 timeouts=0 drains=1 misplaced=0
+```
+
+Kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, `/dev/video2` `iris_driver` /
+`Iris Decoder`, `/dev/video3` `iris_driver` / `Iris Encoder`. This is the
+installed package, not a `DESTDIR` staging run and not a build-tree
+override.
+
 Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
 (`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).
+
+## Codec conformance: Fluster on the installed package (2026-10-24)
+
+Fluster 0.8.0 (`pip install --user fluster-conformance`), run against the
+installed driver with no `LIBVA_DRIVER_NAME` or `LIBVA_DRIVERS_PATH`. Fluster
+reports the backend it found on its own:
+
+```
+"VA-API": "Qualcomm Iris V4L2 stateful (libva-v4l2) (runtime 1.23)"
+"V4L2 M2M": "Iris Decoder (/dev/video2)"
+```
+
+The FFmpeg VA-API wrapper inherits the environment, so the numbers below are
+this driver's, not the firmware's through a different client. Source commit
+`434be71`, driver SHA-256 `f155e2f5…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `ebe7a2b2-…`.
+
+| Suite | Decoder | Passed | Total | Profile split |
+| --- | --- | ---: | ---: | --- |
+| `JVT-AVC_V1` | `FFmpeg-H.264-VAAPI` | 72 | 135 | Constrained Baseline 33/33, Main 39/89, Baseline 0/7, Extended 0/6 |
+| `JCT-VC-HEVC_V1` | `FFmpeg-H.265-VAAPI` | 141 | 147 | Main 131/135, Main 10 9/11, Main Still Picture 1/1 |
+
+Neither number is a driver defect count. Every failure was classified by
+running each vector directly and reading the kernel's own message
+(`~/Lab/Bridge/tmp/fluster/h264-failures.csv`, and the same method for HEVC):
+
+H.264, 63 failures:
+
+| Count | Cause |
+| ---: | --- |
+| 49 | Kernel refuses the stream: `unsupported content, bit depth: 80008, pic_struct = N`, then `state changed from 2 to 5`. All 49 carry `frame_mbs_only_flag = 0` in their SPS (verified with `-bsf:v trace_headers`): the firmware has no field/MBAFF decoding. The driver surfaces the kernel's refusal as an error, which is correct. |
+| 7 | Baseline profile, 6 Extended: neither is advertised in `data/iris-codec-capabilities.json`, so FFmpeg never reaches the hardware path. Expected. |
+| 6 | Baseline/Extended vectors whose decoded pixels differ from the reference, on a profile this driver does not advertise. |
+| 1 | `FM2_SVA_C` could not be probed (no readable elementary stream in the vector directory). |
+
+The 33/33 Constrained Baseline result and the 39 passing Main vectors are
+frame-coded streams, which is the shape the firmware supports.
+
+HEVC, 6 failures:
+
+| Count | Vector | Cause |
+| ---: | --- | --- |
+| 2 | `PICSIZE_A/B_Bossen_1` | 8440 wide, above the node's 8192 limit (`iris_ctrls.c`). |
+| 2 | `WPP_D_ericsson_MAIN_2`, `_MAIN10_2` | 64x240, below the 96 minimum. |
+| 1 | `VPSSPSPPS_A_MainConcept_1` | The vector switches 352x288 -> 1280x720 in one stream. FFmpeg recreates the VA context (`session open` x2) and both paths decode 2 frames, but the reference MD5 differs; it is the same in-context resolution-change family as the AV1 stall above, not a pixel defect. |
+| 1 | `TSUNEQBD_A_MAIN10_Technicolor_2` | `Skipping invalid undecodable NALU` in FFmpeg's own parser before the hardware is reached. |
+
+## Power: saturated decode, software versus this driver (2026-10-24)
+
+Method: battery gauge `voltage_now x |current_now|` at 1 Hz, screen off
+(backlight 0, idle 1.4 W), arms interleaved A/B per round so background drift
+cancels, first 4 s of each window discarded as the ramp transient, 10 s pre-
+and post-baseline. The workload re-decodes the clip back to back so the window
+is always full; a paced `-re` run leaves the device mostly idle and buries the
+difference in gauge noise (measured: a 30 s paced run gave 218 +/- 62 mW for
+the VA arm and 124 +/- 32 mW for software, which does not resolve).
+
+| Workload | VA-API | Software | Difference |
+| --- | ---: | ---: | ---: |
+| 1280x720, unpaced, n=4 | +1861 +/- 64 mW | +5149 +/- 429 mW | **-3289 mW** |
+| 1920x1080, unpaced, n=4 | +2089 +/- 158 mW | +6177 +/- 761 mW | **-4087 mW** |
+
+CPU cost of the same two decodes (`-benchmark`, whole clip, no pacing):
+720p VA `utime=0.302s stime=0.183s`, software `utime=2.202s stime=0.146s`;
+1080p VA `utime=0.487s stime=0.192s`, software `utime=4.020s stime=0.180s`.
+
+Interpretation: at saturation the decoder offload is worth about 3.3 W at
+720p and 4.1 W at 1080p on this tablet. That is the cost of doing the work on
+the CPU, not a claim about a browser session: a browser that plays at 30 fps
+spends most of the time idle and the saving is smaller and noisier, which is
+why the paced numbers above cannot resolve it. The gauge measures the whole
+device; there is no per-block telemetry on this SoC.
