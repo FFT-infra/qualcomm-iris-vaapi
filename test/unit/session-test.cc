@@ -477,12 +477,13 @@ void test_resolution_change_rebuilds_capture()
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
-void test_resolution_change_waits_for_held_frames()
+void test_resolution_change_keeps_held_frames()
 {
     // A Direct client still displaying an old-geometry frame must not lose
-    // the session: the change is deferred until it releases, submits are
-    // refused with SURFACE_BUSY meanwhile, and the new-resolution picture
-    // that triggered the change still decodes afterwards.
+    // the session and must not have to release it first: the change is
+    // usually triggered by that same client submitting the new-resolution
+    // picture, so waiting for a release would wait on the caller. vb2 orphans
+    // the old buffer, so the pool is rebuilt under the holder.
     Harness h;
     Target a;
     h.submit(a);
@@ -492,16 +493,14 @@ void test_resolution_change_waits_for_held_frames()
     h.submit(b);
     h.fake->tick(1); // firmware parses the new-resolution AU
     h.session->service(); // and the session sees SOURCE_CHANGE
-    CHECK(h.session->state() == SessionState::Reconfiguring);
-    CHECK(b.pending); // its OUTPUT is still queued: not lost
-    Target c;
-    CHECK_THROWS(h.submit(c), VA_STATUS_ERROR_SURFACE_BUSY);
-    CHECK(a.frame != nullptr); // the held frame survived untouched
-    h.session->release(a);
     CHECK(h.session->state() == SessionState::Streaming);
-    CHECK(h.session->width() == 1280);
+    CHECK(b.pending); // its OUTPUT is still queued: not lost
+    CHECK(a.frame != nullptr); // the held frame survived untouched
     h.session->wait(b);
     CHECK(b.completed && !b.error);
+    CHECK(h.session->width() == 1280);
+    h.session->release(a);
+    CHECK(h.session->state() == SessionState::Streaming);
 }
 
 // --- misc ------------------------------------------------------------------
@@ -771,7 +770,7 @@ int main()
         { "START EBUSY is retried", test_start_ebusy_is_retried },
         { "finish drains and refuses submit", test_finish_drains_and_refuses_submit },
         { "resolution change rebuilds capture", test_resolution_change_rebuilds_capture },
-        { "resolution change waits for held frames", test_resolution_change_waits_for_held_frames },
+        { "resolution change keeps held frames", test_resolution_change_keeps_held_frames },
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },
         { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },

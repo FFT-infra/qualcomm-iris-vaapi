@@ -888,14 +888,14 @@ void Session::await_drc_last()
 void Session::continue_reconfigure()
 {
     require(state_ == SessionState::Reconfiguring, "continue_reconfigure outside Reconfiguring");
-    // vb2 refuses REQBUFS(0) while an exported buffer is still open. A Direct
-    // client may legitimately hold frames of the old geometry for display;
-    // the change waits for release() and submit() reports SURFACE_BUSY in
-    // the meantime. Copy clients never hold, so Chrome never waits here.
-    if (pool_.capture_held() > 0) {
-        trace_("session reconfigure deferred held=%u", pool_.capture_held());
-        return;
-    }
+    // A Direct client may still hold frames of the old geometry for display.
+    // It must not be asked to release them first: the usual cause of the
+    // change is that client's own submit() of the new-resolution picture, so
+    // waiting would wait on the call that is waiting here. Each held slot
+    // owns the DMA-BUF it came from and vb2 keeps the memory alive after
+    // REQBUFS(0) (orphaning), so the pool is dropped under the holders and
+    // their frames keep reading back (verified on the target, see
+    // docs/architecture.md §4).
     pool_.release_capture();
     // Per the V4L2 stateful decoder contract, CAPTURE STREAMON after the
     // drain resumes decoding at the new geometry; no START is issued and
