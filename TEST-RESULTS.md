@@ -3088,3 +3088,89 @@ Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
 `browser-av1/`), and
 `~/Lab/Bridge/tmp/av1-hdr/` on the builder (the dumped access units, the
 `trace_headers` diffs, and the one-bit patch that proved the field).
+
+## AV1 and H.264 resolution change inside one VA context (2026-10-23)
+
+A concatenated stream that switches from 1280x720 to 854x480 mid-file
+decoded its first segment and then stalled: every 854x480 access unit was
+accepted by the driver, none produced a picture, and the session ended on
+`sync timeout token=43 ... action=fail` followed by `session failed: no LAST
+after STOP`. The same file decoded fully in the in-kernel `v4l2av1dec`
+(GStreamer, 80/80 frames), so the file, the node and the firmware were all
+capable of it.
+
+### What the trace showed
+
+`V4L2_VA_TRACE=1` on the failing run:
+
+```
+event source-change state=1
+session reconfigure 1280x720 ->
+drc drain begin pending=2
+capture token=43 index=5 flags=0x104041 publish=invisible
+drc drain complete last=1
+capture configure 896x480 ... visible=854x480
+session reconfigure -> 854x480
+submit token=44 ...            (six 854x480 access units, all returned clean)
+output return index=0 flags=0x4001 token=44
+sync timeout token=43 pending=6 queued=32 held=0 action=fail
+```
+
+The OUTPUT returns carried no error, so the firmware had consumed the new
+segment and chosen not to decode it. Kernel `dynamic_debug` on
+`iris_inst_change_state` / `iris_inst_change_sub_state` showed an identical
+state machine to GStreamer's on the same file (`0x22` -> `0x66` -> CAPTURE
+STREAMOFF -> STREAMON -> `0`), so the DRC steps themselves were right.
+
+### The defect
+
+`configure_capture()` issued `S_FMT(CAPTURE, <GEOMETRY FROM G_FMT>)` on every
+bring-up, including the one that follows a mid-stream `SOURCE_CHANGE`.
+`iris_vdec_s_fmt` (CAPTURE branch) rewrites `inst->fmt_dst` and `inst->crop`
+from that request, replacing the coded size, stride and crop
+`iris_hfi_gen2_handle_src_change` had just derived from the bitstream. The
+resume then hands the firmware the client's rectangle instead of the
+stream's. GStreamer's strace shows the contract: it never calls `S_FMT` on
+CAPTURE at all, only `G_FMT` then `REQBUFS`.
+
+The fix reads `G_FMT` and issues `S_FMT` only when the driver's answer is not
+the pixel format the client needs (a P010 surface against an NV12 default).
+
+### Why it looked like an AV1 defect
+
+Only the AV1 clip reached it here, and not because AV1 is special: FFmpeg
+recreates its VA context at every coded-size change, so a mid-file switch in
+most streams never reaches the in-context path at all. H.264 was tried as a
+control and turned out not to be one — the H.264 run created two contexts
+(`va create_context` ×2, `reconfigures=0`) and therefore tested context
+teardown, not this defect. The AV1 run stayed in one context
+(`va create_context` ×1), which is why it was the one that stalled. What
+separated "AV1 writer" from "session ordering" was the dump: the rebuilt
+access units decoded cleanly in software (0 errors), so the bytes were
+right and the ordering was not.
+
+### Verification
+
+Source `efa3277`, driver `build-def/src/v4l2_drv_video.so` SHA-256
+`f155e2f51ec28cb70459f3f5460c5cbdd94ed791e60db902de094c916e103566`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`. Node resolved by the `iris_driver`
+QUERYCAP name: `/dev/video2` (`Iris Decoder`). Everything below used the
+build tree (`LIBVA_DRIVERS_PATH=build-def/src`) through `-hwaccel vaapi`
+with `hwdownload,format=nv12`, compared frame by frame to a software decode
+of the same file.
+
+| Run | Before | After |
+| --- | --- | --- |
+| `resize-av1.mkv` (40x 720p + 40x 854x480, AV1) | 40/80 frames, `submitted=49 completed=42 timeouts=1` then `session failed`; FFmpeg exit 251 | `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2`, 80/80 frames MD5-identical to software |
+| `resize-h264.mkv` (same geometry switch, H.264) | exit 0, 80 frames, two contexts | exit 0, 80 frames; not a control for this defect (see above) |
+| `test/iris-matrix.sh` (48 frames per codec) | PASS | PASS: h264, vp9, hevc, av1 all `content=frame-md5` |
+| `test/iris-dynamic-resolution.sh` (6 switches) | PASS | PASS: native baseline, VA single-process and fresh-context runs all frame-exact |
+
+The AV1 run leaves the in-context path visible in its own counters:
+`session reconfigure 1280x720 ->` at the boundary and `session reconfigure ->
+854x480` when the pool is rebuilt, with both segments decoded by the same VA
+context (`contexts=1`).
+
+Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
+(`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).

@@ -21,6 +21,12 @@ std::string FakeDevice::joined_log() const
 
 FormatInfo FakeDevice::get_format(Queue queue)
 {
+    note(std::string("G_FMT ") + (queue == Queue::Output ? "OUTPUT" : "CAPTURE"));
+    return current_format(queue);
+}
+
+FormatInfo FakeDevice::current_format(Queue queue)
+{
     FormatInfo info;
     if (queue == Queue::Output) {
         info.pixelformat = V4L2_PIX_FMT_H264;
@@ -53,8 +59,11 @@ FormatInfo FakeDevice::set_format(Queue queue, const FormatInfo& request)
         return granted;
     }
     require(!capture_on_, "fake: S_FMT CAPTURE while streaming");
-    FormatInfo granted = get_format(Queue::Capture);
-    granted.pixelformat = request.pixelformat;
+    FormatInfo granted = current_format(Queue::Capture);
+    // The kernel substitutes a format it does not support with what is
+    // already there, so a P010 request against this NV12 node is granted
+    // NV12: the session must notice and stay on its G_FMT answer.
+    granted.pixelformat = request.pixelformat == V4L2_PIX_FMT_P010 ? V4L2_PIX_FMT_NV12 : request.pixelformat;
     return granted;
 }
 

@@ -237,6 +237,16 @@ Ordering facts learned on this firmware and kept verbatim:
   finishes, so the session only waits for that `LAST`. The bring-up
   `SOURCE_CHANGE` is not a drain and carries none — the kernel distinguishes
   the two as `IRIS_INST_SUB_FIRST_IPSC` and `IRIS_INST_SUB_DRC_LAST`.
+- The CAPTURE format after a resolution change belongs to the driver, not to
+  the client. `iris_hfi_gen2_handle_src_change` derives the new coded size,
+  stride and crop from the bitstream and hands them over on the resume; an
+  `S_FMT` between the drain and `STREAMON` replaces them with whatever
+  rectangle the client asked for, and the firmware then decodes the whole new
+  segment at a geometry the stream never named. It consumes every access unit
+  and returns nothing: `submitted` climbs, `completed` stays flat, and the
+  session ends on a sync timeout. So `configure_capture()` takes the `G_FMT`
+  answer and issues `S_FMT` only when that answer is not the pixel format the
+  client needs (a P010 surface against an NV12 default).
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.

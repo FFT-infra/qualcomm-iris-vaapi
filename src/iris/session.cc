@@ -172,10 +172,24 @@ void Session::configure_capture()
 {
     // Only meaningful after SOURCE_CHANGE: the decoder has parsed the
     // stream and knows the coded geometry.
+    //
+    // At a resolution change the driver has already derived the new coded
+    // size, stride and crop from the bitstream (iris_hfi_gen2_handle_src_change
+    // -> iris_hfi_gen2_read_input_subcr_params) and hands them to the firmware
+    // on the resume. Asking for the format again would replace them with this
+    // client's guess before that resume, and the firmware then decodes at a
+    // geometry the stream never asked for: the rest of the segment is consumed
+    // and never produces a picture. So the format is set only when the driver's
+    // answer is not the one the client needs (a P010 surface against an NV12
+    // default, an Import layout). G_FMT first, exactly as the Capture Setup
+    // sequence in dev-decoder.rst prescribes.
     const uint32_t pixelformat = config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
     FormatInfo current = device_->get_format(Queue::Capture);
-    current.pixelformat = pixelformat;
-    const FormatInfo granted = device_->set_format(Queue::Capture, current);
+    FormatInfo granted = current;
+    if (current.pixelformat != pixelformat) {
+        current.pixelformat = pixelformat;
+        granted = device_->set_format(Queue::Capture, current);
+    }
     if (granted.pixelformat != pixelformat || granted.num_planes != 1) {
         trace_("capture format rejected wanted=%c%c%c%c granted=%c%c%c%c planes=%u %ux%u", pixelformat & 0xff,
             (pixelformat >> 8) & 0xff, (pixelformat >> 16) & 0xff, (pixelformat >> 24) & 0xff,

@@ -107,6 +107,8 @@ public:
     std::string path() const override { return "/dev/fake-iris"; }
     int fd() const override { return -1; }
     FormatInfo get_format(Queue queue) override;
+    // What the driver would report, without logging the query.
+    FormatInfo current_format(Queue queue);
     FormatInfo set_format(Queue queue, const FormatInfo& request) override;
     std::optional<Selection> get_compose(Queue queue) override;
     void set_crop(unsigned left, unsigned top, unsigned width, unsigned height) override

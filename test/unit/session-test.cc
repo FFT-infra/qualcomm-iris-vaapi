@@ -123,9 +123,14 @@ void test_open_sequence()
     Target t;
     h.submit(t);
     CHECK(log_index(fake, "QBUF OUTPUT 0") < log_index(fake, "EVENT SOURCE_CHANGE"));
-    CHECK(log_index(fake, "EVENT SOURCE_CHANGE") < log_index(fake, "S_FMT CAPTURE"));
-    CHECK(log_index(fake, "S_FMT CAPTURE") < log_index(fake, "REQBUFS CAPTURE"));
+    CHECK(log_index(fake, "EVENT SOURCE_CHANGE") < log_index(fake, "G_FMT CAPTURE"));
+    CHECK(log_index(fake, "G_FMT CAPTURE") < log_index(fake, "REQBUFS CAPTURE"));
     CHECK(log_index(fake, "REQBUFS CAPTURE") < log_index(fake, "STREAMON CAPTURE"));
+    // The driver's own format is the one the firmware will decode at; the
+    // session must not second-guess it with an S_FMT when it already matches
+    // (docs/architecture.md §4: the DRC resume publishes the geometry the
+    // driver derived from the bitstream).
+    CHECK(!log_has(fake, "S_FMT CAPTURE"));
     CHECK(h.session->state() == SessionState::Streaming);
     // Pool: 16 surfaces + 4 headroom -> clamp to 32 minimum.
     CHECK(fake.capture_allocated() == 32);
