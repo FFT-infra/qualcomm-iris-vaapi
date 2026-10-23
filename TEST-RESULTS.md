@@ -3026,8 +3026,10 @@ The 64x64 branch had a second bug of the same kind: it wrote
 
 ### Verification
 
-Build tree only (`build-def`) on the target, no installed package. Source
-`98167ea`, driver `build-def/src/v4l2_drv_video.so` SHA-256
+The first run used the build tree (`build-def`) only; the records below are
+from that driver and were then repeated against the installed package (see
+"Install" at the end of this section). Source `98167ea`, driver
+`build-def/src/v4l2_drv_video.so` SHA-256
 `0913ddec2eebe3dd6a0da054e524a225f60dc67ec046454e3ef21abaaaeb0ded`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, boot
 `90670102-4d45-4b5b-935d-a3dbe97de028`. Node resolved by the `iris_driver`
@@ -3055,6 +3057,31 @@ Chrome was re-run on the same clip with the build-tree driver
 platform true, 501 frames / 0 dropped, `submitted=716 completed=716
 errors=0 drops=0`, all `publish=copy-gpu`, GPU process holding
 `/dev/video17`.
+
+### Install and the installed-package recheck
+
+`install-system.sh build-def` over the 2026-09-22 package. Manifest: source
+`ab19b8a`, artifact `0913ddec…`, the previous driver kept at
+`/usr/local/share/iris-vaapi/backup/`. The installed
+`/usr/lib64/dri/v4l2_drv_video.so` is byte-identical to the build-tree one,
+and `LIBVA_DRIVER_NAME`/`LIBVA_DRIVERS_PATH` were unset for the recheck, so
+libva resolved the driver through `msm_drv_video.so` the way a client that
+knows nothing about this project does.
+
+| Clip, installed driver | Session | Frames |
+| --- | --- | --- |
+| `yt-720.webm` | `submitted=5448 completed=5448 errors=0 drops=0` | 5326/5326 MD5-identical |
+| `yt-1080.mp4` | `exit 0` | 5326/5326 MD5-identical |
+
+GStreamer's `vaav1dec` is not evidence for this codec yet: its element syncs
+each surface as it goes, which releases the held picture and makes the next
+`vaEndPicture` fail with "AV1 stream continued after a picture was released
+at download time". The FFmpeg and Chrome paths do not do that. Not a
+regression from this change: the same pipeline against the backed-up
+previous driver (`66a6a98…`) logs the same 30 refusals, so it is a property
+of the held-picture contract and this client, not of the header fix. It
+belongs in the record as a client that does not decode AV1 through this
+driver.
 
 Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
 (`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`,
