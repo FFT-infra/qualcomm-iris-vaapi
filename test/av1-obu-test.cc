@@ -2,6 +2,7 @@
 // the fields whose coding is not a plain copy of the VA value. No hardware:
 // the OBU writer is a pure function of the VA picture buffer.
 #include "../src/codec/av1_obu.h"
+#include "../src/codec/translator.h"
 
 #include <cstring>
 #include <iostream>
@@ -93,7 +94,8 @@ size_t obu_payload(const std::vector<uint8_t>& bytes, unsigned type)
     throw std::runtime_error("OBU type not found in the rebuilt unit");
 }
 
-VADecPictureParameterBufferAV1 key_frame(bool superblocks_128, unsigned lr_unit_shift)
+VADecPictureParameterBufferAV1 key_frame(bool superblocks_128, unsigned lr_unit_shift,
+    unsigned width = 1280, unsigned height = 720)
 {
     VADecPictureParameterBufferAV1 picture = {};
     picture.profile = 0;
@@ -103,8 +105,8 @@ VADecPictureParameterBufferAV1 key_frame(bool superblocks_128, unsigned lr_unit_
     seq.subsampling_x = 1;
     seq.subsampling_y = 1;
     picture.order_hint_bits_minus_1 = 6;
-    picture.frame_width_minus1 = 1279;
-    picture.frame_height_minus1 = 719;
+    picture.frame_width_minus1 = width - 1;
+    picture.frame_height_minus1 = height - 1;
     auto& pic = picture.pic_info_fields.bits;
     pic.frame_type = 0; // KEY_FRAME
     pic.show_frame = 1;
@@ -185,6 +187,61 @@ unsigned walk_key_header(bool superblocks_128, unsigned lr_unit_shift, std::vect
     return coded;
 }
 
+// Walk to the frame_size_override_flag of a rebuilt key frame. The bits
+// before it are fixed for these synthetic pictures: a shown key frame makes
+// error_resilient_mode implicit and clears allow_screen_content_tools.
+unsigned read_frame_size_override(const std::vector<uint8_t>& unit)
+{
+    Reader reader(unit, obu_payload(unit, 6));
+    check(reader.bit() == 0, "show_existing_frame is not signalled");
+    check(reader.bits(2) == 0, "frame_type is KEY_FRAME");
+    check(reader.bit() == 1, "show_frame is set");
+    check(reader.bit() == 1, "disable_cdf_update is forwarded");
+    check(reader.bit() == 0, "allow_screen_content_tools is clear");
+    return reader.bit();
+}
+
+// A held picture is released by the arrival of its successor, and it has to
+// be written against the sequence it arrived in. Where the successor is a key
+// frame at a new resolution (the shape a stream takes around a resolution
+// change) the two sequences disagree, and taking the new one made the old
+// frame announce a frame_size_override against the new width bits: the header
+// stopped parsing and the firmware answered ERROR.
+void test_held_picture_across_a_resolution_change()
+{
+    using iris::codec::AccessUnit;
+    using iris::codec::Picture;
+
+    const auto translate_key = [](const VADecPictureParameterBufferAV1& parameters, uint32_t surface,
+                                   iris::codec::Translator& translator, AccessUnit& out) {
+        const uint8_t tile_data[8] = { 0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 3 };
+        VASliceParameterBufferAV1 slice = {};
+        slice.slice_data_offset = 0;
+        slice.slice_data_size = sizeof(tile_data);
+        Picture picture;
+        picture.parameters = &parameters;
+        picture.slice_parameters = { &slice };
+        picture.slice_data = { { tile_data, sizeof(tile_data) } };
+        picture.surface_id = surface;
+        translator.translate(picture, out);
+    };
+
+    const VADecPictureParameterBufferAV1 hd = key_frame(true, 1, 1280, 720);
+    const VADecPictureParameterBufferAV1 sd = key_frame(false, 0, 854, 480);
+    auto translator = iris::codec::make_av1(VAProfileAV1Profile0);
+
+    AccessUnit out;
+    translate_key(hd, 1, *translator, out);
+    check(out.deferred, "the first picture is held back");
+
+    // The key frame at the new resolution releases the 1280x720 one.
+    translate_key(sd, 2, *translator, out);
+    check(!out.deferred, "the successor releases the held picture");
+    check(out.sequence_start, "the released picture starts its own sequence");
+    check(read_frame_size_override(out.bytes) == 0,
+        "the released frame is coded at its own sequence size");
+}
+
 void test_lr_unit_shift()
 {
     // 128x128 superblocks: the unit shift is coded as increments from 1, so
@@ -213,6 +270,7 @@ int main()
 {
     try {
         test_lr_unit_shift();
+        test_held_picture_across_a_resolution_change();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;
@@ -221,6 +279,6 @@ int main()
         std::cerr << failures << " AV1 OBU check(s) failed\n";
         return 1;
     }
-    std::cout << "PASS AV1 frame header rebuild (loop restoration unit shift)\n";
+    std::cout << "PASS AV1 frame header rebuild (loop restoration unit shift, held picture across a size change)\n";
     return 0;
 }

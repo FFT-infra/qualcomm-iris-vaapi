@@ -34,11 +34,7 @@ public:
         // Sequence state and the previous picture's refresh flags come from
         // this picture's view of the world.
         const bool key_frame = parameters.pic_info_fields.bits.frame_type == 0;
-        if (!seen_sequence_ || key_frame) {
-            sequence_ = av1_sequence_state(parameters);
-            seen_sequence_ = true;
-            emit_sequence_header_ = true;
-        }
+        const bool starts_sequence = !seen_sequence_ || key_frame;
         // A picture released at download time refreshed no slot, so the
         // references this one makes are not what the stream asked for. Only
         // an intra picture that refreshes everything by itself can recover;
@@ -57,7 +53,11 @@ public:
                     previous_refresh |= static_cast<uint8_t>(1u << slot);
         }
 
-        // Release the held picture into `out`...
+        // Release the held picture into `out`. It is still coded against the
+        // sequence it arrived in, so this has to happen before this picture's
+        // sequence state replaces that one: at a resolution change the two
+        // disagree, and writing the old frame with the new width/height bits
+        // corrupts its header.
         out.bytes.clear();
         out.deferred = false;
         out.sequence_start = false;
@@ -65,6 +65,12 @@ public:
             build(previous_refresh, out);
         } else {
             out.deferred = true;
+        }
+
+        if (starts_sequence) {
+            sequence_ = av1_sequence_state(parameters);
+            seen_sequence_ = true;
+            emit_sequence_header_ = true;
         }
 
         // ...and hold this one.
