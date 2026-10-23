@@ -241,12 +241,25 @@ Ordering facts learned on this firmware and kept verbatim:
   the client. `iris_hfi_gen2_handle_src_change` derives the new coded size,
   stride and crop from the bitstream and hands them over on the resume; an
   `S_FMT` between the drain and `STREAMON` replaces them with whatever
-  rectangle the client asked for, and the firmware then decodes the whole new
-  segment at a geometry the stream never named. It consumes every access unit
-  and returns nothing: `submitted` climbs, `completed` stays flat, and the
-  session ends on a sync timeout. So `configure_capture()` takes the `G_FMT`
+  rectangle the client asked for. So `configure_capture()` takes the `G_FMT`
   answer and issues `S_FMT` only when that answer is not the pixel format the
-  client needs (a P010 surface against an NV12 default).
+  client needs (a P010 surface against an NV12 default). This is a contract
+  requirement on its own; it is not what makes an in-context AV1 resolution
+  change work — see the next bullet.
+- An in-context AV1 resolution change is not reliable on this firmware. With
+  the ioctl order identical to what `v4l2av1dec` issues (no `S_FMT`, drain to
+  the boundary `LAST`, `STREAMOFF`/`REQBUFS(0)`, re-read `G_FMT`, rebuild,
+  `STREAMON`), and with the kernel's sub-state machine byte-for-byte the same
+  (`0x22` -> `0x66` -> `0`), roughly two runs in three still stall: the
+  boundary access unit completes once with `ERROR|LAST`, no picture-type bit
+  and no payload, and the firmware then produces no picture for the new
+  segment at all. A run that works returns that same access unit a second
+  time with a real picture. Which branch the firmware takes is not visible to
+  userspace and does not correlate with anything this driver controls.
+  `TEST-RESULTS.md` records the measurements. Treat in-context DRC as
+  unqualified for AV1; the qualified path is the one clients already take by
+  default (FFmpeg recreates its VA context at a coded-size change, H.264
+  included).
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.

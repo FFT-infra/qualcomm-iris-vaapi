@@ -3151,7 +3151,7 @@ right and the ordering was not.
 
 ### Verification
 
-Source `efa3277`, driver `build-def/src/v4l2_drv_video.so` SHA-256
+Source `99dcf30`, driver `build-def/src/v4l2_drv_video.so` SHA-256
 `f155e2f51ec28cb70459f3f5460c5cbdd94ed791e60db902de094c916e103566`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, boot
 `ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`. Node resolved by the `iris_driver`
@@ -3160,9 +3160,9 @@ build tree (`LIBVA_DRIVERS_PATH=build-def/src`) through `-hwaccel vaapi`
 with `hwdownload,format=nv12`, compared frame by frame to a software decode
 of the same file.
 
-| Run | Before | After |
+| Run | Before `99dcf30` | After `99dcf30` |
 | --- | --- | --- |
-| `resize-av1.mkv` (40x 720p + 40x 854x480, AV1) | 40/80 frames, `submitted=49 completed=42 timeouts=1` then `session failed`; FFmpeg exit 251 | `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2`, 80/80 frames MD5-identical to software |
+| `resize-av1.mkv` (40x 720p + 40x 854x480, AV1) | 40/80 frames, `submitted=49 completed=42 timeouts=1` then `session failed`; FFmpeg exit 251 | **not fixed.** 1 of 3 runs: 80/80 frames, `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2`, MD5-identical to software. The other 2: the same 40/80 stall and exit 251 |
 | `resize-h264.mkv` (same geometry switch, H.264) | exit 0, 80 frames, two contexts | exit 0, 80 frames; not a control for this defect (see above) |
 | `test/iris-matrix.sh` (48 frames per codec) | PASS | PASS: h264, vp9, hevc, av1 all `content=frame-md5` |
 | `test/iris-dynamic-resolution.sh` (6 switches) | PASS | PASS: native baseline, VA single-process and fresh-context runs all frame-exact |
@@ -3171,6 +3171,57 @@ The AV1 run leaves the in-context path visible in its own counters:
 `session reconfigure 1280x720 ->` at the boundary and `session reconfigure ->
 854x480` when the pool is rebuilt, with both segments decoded by the same VA
 context (`contexts=1`).
+
+### Correction (same day): the defect is not fixed, it is probabilistic
+
+The first version of this section claimed the run above proved the fix. It
+did not: one hardware run was treated as a result. Eight further runs from
+the same committed build and the same driver binary
+(`f155e2f5…`, unchanged) split as follows.
+
+| Runs | Result |
+| --- | --- |
+| 3 of 11 | 80/80 frames, exit 0 |
+| 8 of 11 | 40/80 frames, `sync timeout token=43`, `session failed: no LAST after STOP`, exit 251 |
+
+What separates them, from `V4L2_VA_TRACE=1` plus an OUTPUT-dequeue probe
+(`PROBE out index=… token=…`) and `dynamic_debug` on `iris_state.c`:
+
+- The kernel sub-state machine is identical in both
+  (`0x22` -> `0x66` -> CAPTURE `STREAMOFF` -> `STREAMON` -> `0`), so the DRC
+  steps this driver issues are right. GStreamer `v4l2av1dec` on the same
+  file, same node, same kernel decodes 80/80 in 5 consecutive runs, and an
+  ioctl-level strace of its DRC window shows the same order: no `S_FMT` on
+  CAPTURE, `G_FMT` only, drain to the boundary `LAST`, `STREAMOFF`,
+  `REQBUFS(0)`, `REQBUFS(5)`, `STREAMON`.
+- The boundary access unit (token 43, the first 854x480 key frame) completes
+  exactly once, as `flags=0x104041` (`ERROR|LAST`, no picture-type bit, no
+  payload). In a run that works the *same* token completes twice: that
+  marker first, then `0x4009` (KEYFRAME, real pixels) after the rebuilt pool
+  is streaming.
+- In the failing runs the OUTPUT slot that carried token 43 returns before
+  the resume, and a later access unit takes the same slot; in the working
+  runs it stays owned by the firmware until after `STREAMON`. Same binary,
+  same file, same node, different interleaving.
+- The failing runs also see one extra empty `LAST` (`0x104001`, token 0) on
+  the rebuilt pool immediately after `STREAMON`, which sets
+  `q->last_buffer_dequeued` in vb2 and turns every later CAPTURE `DQBUF`
+  into `EPIPE`. The firmware answered the resume by declaring the queue
+  finished.
+
+None of that is addressable from this driver: it consumes the boundary
+access unit, it decides whether to decode it a second time, and it decides
+whether the resumed CAPTURE queue is finished. Only FFmpeg's own context
+recreation path (`contexts=2`, which H.264 already takes and which every
+FFmpeg build does at a coded-size change) avoids it entirely.
+
+So the `S_FMT` change stays — it is a contract requirement
+(`docs/architecture.md` §4) and without it the working runs would decode the
+new segment at a geometry the stream never named — but in-context AV1 DRC
+stays **unqualified**. `data/iris-codec-capabilities.json` and
+`docs/architecture.md` carry that, and the target-side evidence is
+`~/Lab/Bridge/tmp/iris-bench/av1-720/` (`out-a.log` success, `out-b.log`
+failure, `gst.strace`, `flag-a.log`, `dd-c.dmesg`).
 
 Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
 (`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).

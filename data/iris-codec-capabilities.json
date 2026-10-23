@@ -165,6 +165,7 @@
       ],
       "publish_import": "fallback",
       "sync_note": "VA carries no refresh_frame_flags, so the translator holds each picture until the next access unit's reference map names its slots. The firmware also returns a hidden (show_frame=0) picture without pixels; the session attributes it by decode order and publishes it anyway. A client that syncs a held surface before submitting the next picture waits for the sync bound, and at end of stream that bound expires and the picture is released as final",
+      "resolution_note": "A resolution change inside one VA context is unqualified: the boundary access unit comes back once as ERROR|LAST with no picture, and the firmware then stops producing pictures for the new segment (2 of 3 runs on 2026-10-23; TEST-RESULTS.md). The ioctl order and the kernel sub-state machine match v4l2av1dec, which decodes the same file. Clients that recreate the VA context at a coded-size change - FFmpeg does, for every codec - never reach that path and are unaffected",
       "encode": {
         "production": "absent",
         "va_profiles": [],
