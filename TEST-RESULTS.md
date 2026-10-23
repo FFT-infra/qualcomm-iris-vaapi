@@ -3050,7 +3050,14 @@ reach: it uses 64x64 superblocks and has restoration disabled.
 `test/av1-obu-test.cc` (new) walks the rebuilt header back in spec order
 and fails on three checks if the writer reverts to a boolean coding.
 
+Chrome was re-run on the same clip with the build-tree driver
+(`test/iris-browser-acceptance.sh`, `V4L2_VA_TRACE=1`): `VaapiVideoDecoder`,
+platform true, 501 frames / 0 dropped, `submitted=716 completed=716
+errors=0 drops=0`, all `publish=copy-gpu`, GPU process holding
+`/dev/video17`.
+
 Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
-(`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`), and
+(`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`,
+`browser-av1/`), and
 `~/Lab/Bridge/tmp/av1-hdr/` on the builder (the dumped access units, the
 `trace_headers` diffs, and the one-bit patch that proved the field).
