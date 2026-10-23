@@ -11,6 +11,7 @@ On the tablet, run the following verification gates:
 - `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
 - `test/iris-matrix.sh`: framemd5 output equivalence against software.
 - `test/iris-throughput.sh`: decode fps through this driver against the native V4L2 decoders, plus per-frame MD5 at every size it runs.
+- `test/iris-power-sampler.sh`: battery-side power of a saturated decode, this driver against software, arms interleaved. Needs the screen off; a paced playback run does not resolve the difference on this gauge.
 - `test/iris-structure-matrix.sh`: decoding structural variants (all-I, B-frames).
 - `test/iris-dynamic-resolution.sh`: handles in-stream resolution changes.
 - `test/iris-concurrency-soak.sh`: multi-context thermal/stability soaking.
