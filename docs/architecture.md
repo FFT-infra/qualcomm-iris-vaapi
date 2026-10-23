@@ -209,7 +209,7 @@ same policy from the API.
 ```
 Closed --open()--> Configured(OUTPUT S_FMT, DISPLAY_DELAY probe, OUTPUT REQBUFS 4, OUTPUT STREAMON)
 Configured --first submit + SOURCE_CHANGE--> Streaming(CAPTURE G_FMT/S_FMT, G_SELECTION, MIN_BUFFERS, REQBUFS N, EXPBUF, QBUF all, STREAMON)
-Streaming --SOURCE_CHANGE (DRC)--> Draining(STOP) --LAST--> Reconfiguring(STREAMOFF CAPTURE, REQBUFS 0, drop pool, re-enter Streaming with new geometry)
+Streaming --SOURCE_CHANGE (DRC)--> Draining(implicit: the kernel finishes the pre-change pictures and marks the boundary with LAST) --LAST--> Reconfiguring(STREAMOFF CAPTURE, REQBUFS 0, drop pool, re-enter Streaming with new geometry)
 Streaming --sync timeout in display-order mode--> Draining(STOP) --LAST--> Streaming(START)
 Streaming --destroyContext--> Finishing(wait pending, STOP, LAST) --> Closed
 any --EIO/EPIPE on DQBUF, firmware error--> Failed (every pending surface -> DECODING_ERROR; no retries on this fd)
@@ -230,6 +230,13 @@ Ordering facts learned on this firmware and kept verbatim:
 - A CAPTURE buffer with `bytesused <= data_offset` or the ERROR flag and a
   zero timestamp is a firmware error marker: count it, requeue it, never
   publish it.
+- A mid-stream `SOURCE_CHANGE` is already a drain: the kernel returns the
+  pictures from before the change, puts `LAST` on the CAPTURE buffer at the
+  boundary (`HFI_BUF_FW_FLAG_PSC_LAST`) and stops the decoder. Issuing
+  `DECODER_CMD_STOP` on top of it asks for a second drain the firmware never
+  finishes, so the session only waits for that `LAST`. The bring-up
+  `SOURCE_CHANGE` is not a drain and carries none — the kernel distinguishes
+  the two as `IRIS_INST_SUB_FIRST_IPSC` and `IRIS_INST_SUB_DRC_LAST`.
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.
@@ -487,9 +494,11 @@ capture error index=<i> flags=<hex> token=<n> publish=drop            (timestamp
 capture empty index=<i> flags=<hex> last=0|1
 capture last
 capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
-drain begin reason=eos|timeout|drc|finish pending=<n>
+drain begin reason=eos|timeout|finish pending=<n>
 drain complete last=1 output_queued=<n>
 drain lost token=<n>
+drc drain begin pending=<n>
+drc drain complete last=1
 restart
 sync timeout token=<n> pending=<n> queued=<n> held=<n> action=drain|fail
 session reconfigure <w>x<h> ->
