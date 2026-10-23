@@ -166,6 +166,10 @@ private:
     void drain(const char* reason, bool wait_output);
     void restart();
     void reconfigure();
+    // Wait for the LAST the kernel marks on the implicit drain a SOURCE_CHANGE
+    // already performed. Issuing a decoder STOP here would ask the firmware
+    // for a second drain it will not complete.
+    void await_drc_last();
     // Completes a deferred resolution change once no CAPTURE frame is held.
     void continue_reconfigure();
     void fail_unrecoverable_tokens();

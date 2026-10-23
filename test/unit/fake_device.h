@@ -184,6 +184,14 @@ private:
     // STOP finished with no CAPTURE slot for LAST: the next queued slot
     // returns LAST at once (iris_vb2_buf_queue does the same).
     bool last_pending_ = false;
+    // The SOURCE_CHANGE boundary LAST is emitted once per change, on the
+    // event itself rather than on STOP.
+    bool drc_last_sent_ = false;
+    // Import pool: no slot was free when the event was dequeued, so the next
+    // buffer queued to CAPTURE carries the boundary LAST.
+    bool drc_last_pending_ = false;
+    // The queued source change is a mid-stream one, so it ends with LAST.
+    bool drc_change_ = false;
     void emit_last(unsigned slot);
 };
 

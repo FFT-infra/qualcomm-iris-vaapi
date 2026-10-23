@@ -462,10 +462,15 @@ void test_resolution_change_rebuilds_capture()
     CHECK(h.session->stats().reconfigures == 1);
     CHECK(h.session->width() == 1280 && h.session->height() == 720);
     const auto& fake = *h.fake;
-    // STOP -> LAST -> STREAMOFF CAPTURE -> REQBUFS 0 -> S_FMT -> REQBUFS -> STREAMON.
-    const size_t stop = log_index(fake, "DECODER_CMD STOP");
+    // SOURCE_CHANGE is the implicit drain, so the boundary LAST arrives with
+    // the event and no decoder STOP follows: STREAMOFF CAPTURE -> REQBUFS 0 ->
+    // S_FMT -> REQBUFS -> STREAMON. A STOP here would ask the firmware for a
+    // second drain it never finishes, which is what stranded a real AV1
+    // stream at its resolution change.
+    CHECK(!log_has(fake, "DECODER_CMD STOP"));
+    const size_t change = log_index(fake, "EVENT SOURCE_CHANGE");
     const size_t off = log_index(fake, "STREAMOFF CAPTURE");
-    CHECK(stop < off);
+    CHECK(change < off);
     CHECK(log_has(fake, "REQBUFS CAPTURE 0"));
     // OUTPUT was never stopped.
     CHECK(!log_has(fake, "STREAMOFF OUTPUT"));

@@ -208,6 +208,12 @@ void FakeDevice::queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd,
         close(capture_fds_[index]);
     capture_fds_[index] = dup(dmabuf_fd);
     note("QBUF CAPTURE DMABUF " + std::to_string(index) + " fd=" + std::to_string(dmabuf_fd));
+    if (drc_last_pending_) {
+        drc_last_pending_ = false;
+        drc_last_sent_ = true;
+        emit_last(index);
+        return;
+    }
     if (last_pending_) {
         emit_last(index);
         return;
@@ -255,6 +261,7 @@ void FakeDevice::stream(Queue queue, bool on)
     capture_on_ = on;
     if (on) {
         drc_blocked_ = false;
+        drc_last_sent_ = false;
         stopped_ = false;
     } else {
         capture_queue_.clear();
@@ -270,6 +277,25 @@ Event FakeDevice::dequeue_event()
     if (source_change_pending_) {
         source_change_pending_ = false;
         note("EVENT SOURCE_CHANGE");
+        // A mid-stream source change is an implicit drain (dev-decoder.rst
+        // "Dynamic Resolution Change"): the kernel finishes the pictures from
+        // before the change and marks the boundary with LAST on a CAPTURE
+        // buffer, without any decoder STOP. The bring-up source change is not
+        // a drain and carries no LAST; the kernel models the two as
+        // IRIS_INST_SUB_FIRST_IPSC and IRIS_INST_SUB_DRC_LAST. The marker may
+        // be empty and belongs to no picture, so it borrows a free slot, or
+        // the next one queued when an import pool has none.
+        if (drc_change_ && !drc_last_sent_) {
+            if (!capture_queue_.empty()) {
+                const unsigned slot = capture_queue_.front();
+                capture_queue_.pop_front();
+                emit_last(slot);
+                drc_last_sent_ = true;
+            } else {
+                drc_last_pending_ = true;
+            }
+        }
+        drc_change_ = false;
         return Event::SourceChange;
     }
     return Event::None;
@@ -365,6 +391,7 @@ void FakeDevice::complete_one()
         config_.stride = pending_drc_->first;
         pending_drc_.reset();
         source_change_pending_ = true;
+        drc_change_ = true;
         output_queue_.push_front(au);
         --decoded_since_stream_;
         drc_blocked_ = true;

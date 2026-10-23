@@ -828,15 +828,21 @@ void Session::restart()
 
 void Session::reconfigure()
 {
-    // Mid-stream resolution change. The kernel contract: STOP, wait LAST,
-    // STREAMOFF CAPTURE, REQBUFS(0), then re-read the format and rebuild.
-    // OUTPUT keeps streaming. Held frames from the old geometry stay valid
-    // for their holders (they own the fd); the pool must be empty of holds
-    // before REQBUFS(0), so callers are expected to have released targets
-    // they no longer display. If one is still held, the change waits.
+    // Mid-stream resolution change. The kernel contract: SOURCE_CHANGE is an
+    // implicit drain (dev-decoder.rst), so the last picture from before the
+    // change comes back with LAST and the decoder is already stopped. Waiting
+    // for that LAST is this side's whole drain; a DECODER_CMD_STOP on top of
+    // it starts a second drain the firmware has nothing left to finish, and
+    // no second LAST ever arrives. Then STREAMOFF CAPTURE, REQBUFS(0), re-read
+    // the format and rebuild. OUTPUT keeps streaming. Held frames from the
+    // old geometry stay valid for their holders (they own the fd); the pool
+    // must be empty of holds before REQBUFS(0), so callers are expected to
+    // have released targets they no longer display. If one is still held, the
+    // change waits.
     ++stats_.reconfigures;
     trace_("session reconfigure %ux%u ->", config_.width, config_.height);
-    drain("drc", false);
+    await_drc_last();
+    fail_unrecoverable_tokens();
     state_ = SessionState::Reconfiguring;
     device_->stream(Queue::Capture, false);
     pool_.mark_all_capture_returned();
@@ -846,6 +852,37 @@ void Session::reconfigure()
         for (unsigned i = 0; i < pool_.capture_count(); ++i)
             copier_->forget(pool_.take_capture(i)->id());
     continue_reconfigure();
+}
+
+void Session::await_drc_last()
+{
+    // The kernel marks the boundary on a CAPTURE buffer, which has to be
+    // queued for it to come back; the marker may carry no pixels and is not
+    // attributed to any picture.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLastWaitMs);
+    ++stats_.drains;
+    trace_("drc drain begin pending=%zu", pending_.size());
+    while (!saw_last_) {
+        if (expired(deadline)) {
+            fail("no LAST after SOURCE_CHANGE");
+            throw Error(VA_STATUS_ERROR_DECODING_ERROR, "decoder did not drain");
+        }
+        if (pool_.capture_memory() == CaptureMemory::Import) {
+            // An import pool only queues buffers the client exported, one at
+            // a time and only for pictures it still owes. The boundary marker
+            // is not a picture; lend it a scratch buffer when nothing is
+            // queued, exactly as the explicit drain does.
+            queue_import_next();
+            if (pool_.capture_queued() == 0)
+                pool_.queue_capture_scratch();
+        } else {
+            pool_.requeue_capture();
+        }
+        device_->poll(POLLIN | POLLPRI, 5);
+        handle_output_returns();
+        handle_capture_returns();
+    }
+    trace_("drc drain complete last=1");
 }
 
 void Session::continue_reconfigure()
