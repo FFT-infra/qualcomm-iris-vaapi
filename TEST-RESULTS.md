@@ -2975,3 +2975,82 @@ rendition-dependent observation, not a conclusion.
 Scratch artifacts: `~/Lab/Bridge/tmp/iris-bench/` on the target
 (`site/ab-*/browser.log` per run, `vp9alt/` for the local alt-ref probes,
 `olddrv/` for the previous driver).
+
+## AV1 loop restoration: the frame header carried the wrong unit (2026-10-23)
+
+The open AV1 observation above had a cause, and it was the driver's OBU
+writer, not the firmware or the rendition.
+
+### What the failure looked like
+
+`yt-720.webm` (AV1 1280x720, 5326 frames, 4 tiles, 128x128 superblocks,
+loop restoration enabled) through `av1_vaapi` died on its third key frame.
+The session logged `capture token=18 flags=0x4049 publish=error` and then a
+cascade of `0x4051 publish=error` / `publish=drop`; FFmpeg exited with an
+I/O error after 24 of 213 submitted pictures. The same file decoded
+correctly with the in-kernel `v4l2av1dec`, so the file and the node were
+both fine.
+
+### How it was pinned to one bit
+
+- `V4L2_VA_DUMP` wrote every rebuilt access unit; the failing one (16808
+  bytes) failed on its own in both `aomdec` ("Failed to decode tile data")
+  and libdav1d, so it did not depend on the frames before it.
+- A hybrid stream (rebuilt units up to the key frame, then the source's own
+  key frame) decoded; the reverse did not. The defect is inside the
+  rebuilt key access unit.
+- The four tile payloads were byte-identical to the source
+  (`[5224, 4686, 4089, 2766]`), so the tiles and the tile-size prefixes
+  were not the problem.
+- `ffmpeg -bsf:v trace_headers` on the source and rebuilt key access units
+  produced the same fields everywhere except two, both of them expected and
+  legal (`use_superres` present because our sequence header enables it,
+  `tile_size_bytes_minus_1` = 3 instead of 1). One real difference remained:
+  `lr_unit_shift`, source 1, rebuilt 2.
+- Clearing that single bit in the dumped access unit made `aomdec` accept
+  it.
+
+### The defect
+
+`lr_unit_shift` is coded as `read_increment()`: unary ones from the range
+minimum, a zero ends it, and `range_max` ends it without a zero
+(`libavcodec/cbs_av1.c`, `cbs_av1_write_increment`; spec 5.9.20). With
+64x64 superblocks the range is 0..2; with 128x128 superblocks it is 1..2.
+The writer emitted `lr_unit_shift != 0` as one bit in both branches, so
+VA's resolved 1 became a coded 2 in 128x128 streams. The decoder then ran
+restoration over a 128-pixel unit where the encoder had used 64, and the
+tile data it read did not match what it expected.
+
+The 64x64 branch had a second bug of the same kind: it wrote
+`lr_unit_shift ? 1 : 0` twice, so 1 and 2 were indistinguishable there too.
+
+### Verification
+
+Build tree only (`build-def`) on the target, no installed package. Source
+`98167ea`, driver `build-def/src/v4l2_drv_video.so` SHA-256
+`0913ddec2eebe3dd6a0da054e524a225f60dc67ec046454e3ef21abaaaeb0ded`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`90670102-4d45-4b5b-935d-a3dbe97de028`. Node resolved by the `iris_driver`
+QUERYCAP name: `/dev/video17` (`Iris Decoder`), encoder `/dev/video18`.
+Everything below ran through `-hwaccel vaapi` with `hwdownload,format=nv12`
+and was compared frame by frame to a software decode of the same file
+(`format=nv12`, so stride cannot account for a difference).
+
+| Clip | Before | After |
+| --- | --- | --- |
+| `yt-720.webm` AV1 1280x720 | stops at token 18, 24/213 pictures, FFmpeg exit 251 | `submitted=5448 completed=5448 errors=0 drops=0`, 5326/5326 frames MD5-identical |
+| `yt-1080.mp4` AV1 1920x1080 | not re-run (same writer path) | `submitted=5471 completed=5471 errors=0 drops=0`, 5326/5326 frames MD5-identical |
+| `test/av1-obu-roundtrip.sh` default source | 18/32 bit-exact | 18/32 bit-exact, unchanged |
+| `test/av1-obu-roundtrip.sh` on 120 frames of `yt-720.webm` | — | 72 rebuilt / 120 source, all bit-exact |
+
+The last row is the roundtrip test pointed at the real multi-tile stream
+(`IRIS_AV1_ROUNDTRIP_SOURCE`), which the 320x180 default source cannot
+reach: it uses 64x64 superblocks and has restoration disabled.
+
+`test/av1-obu-test.cc` (new) walks the rebuilt header back in spec order
+and fails on three checks if the writer reverts to a boolean coding.
+
+Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
+(`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`), and
+`~/Lab/Bridge/tmp/av1-hdr/` on the builder (the dumped access units, the
+`trace_headers` diffs, and the one-bit patch that proved the field).
