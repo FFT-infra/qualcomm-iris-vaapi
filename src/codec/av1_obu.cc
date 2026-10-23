@@ -401,8 +401,11 @@ void write_lr_params(BitWriter& writer, const VADecPictureParameterBufferAV1& pi
     }
     if (!uses_lr)
         return;
+    // VA carries the resolved lr_unit_shift: 1 or 2 with 128x128 superblocks,
+    // 0..2 otherwise. The bitstream codes it as unary increments from the
+    // range minimum, so the 128x128 case writes one less than VA's value.
     if (picture.seq_info_fields.fields.use_128x128_superblock) {
-        writer.bit(lr.lr_unit_shift ? 1 : 0);
+        writer.bit(lr.lr_unit_shift > 1 ? 1 : 0);
     } else {
         writer.bit(lr.lr_unit_shift ? 1 : 0);
         if (lr.lr_unit_shift)
