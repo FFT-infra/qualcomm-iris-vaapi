@@ -62,6 +62,27 @@ picture without its references is a negative random-access test.
 pre-export surfaces, so every completion must be `publish=direct` with zero
 copy-engine involvement and software-identical pixels.
 
+`test/iris-alloc-chain.sh` walks the stable-buffer allocation chain
+(`docs/architecture.md` §3.4): MSM GEM cached-coherent, MSM GEM
+write-combined, system DMA heap. The last rung is only reached when the
+first two are refused, which no ordinary run does, so the script runs
+`test/iris-alloc-probe` under `test/alloc-fault.so` — an `LD_PRELOAD` shim
+that returns `EINVAL` (or, for the `coherent-enomem` mode, `ENOMEM`) from the
+MSM GEM allocations the probe asks it to refuse. Each mode asserts the
+resulting `MemoryOrigin`, that the allocation log shows exactly the rungs the
+chain may try, and that a written pattern survives a CPU sync:
+
+```
+./test/iris-alloc-chain.sh /dev/dri/renderD128 build
+```
+
+The `ENOMEM` mode is the one that matters for correctness: `msm_alloc.c`
+masks only `EINVAL` and `EOPNOTSUPP`, so a real failure must fall straight to
+the DMA heap without a write-combined retry. The probe refuses to run an
+injected mode without the shim, or with the shim loaded but
+`IRIS_TEST_ALLOC_FAULT` unset, so a pass cannot come from the fast path
+happening to work.
+
 `test/iris-dynamic-resolution.sh` alternates 640x360 and 1280x720 one
 hundred times for H.264 (default) or VP9 (`IRIS_DYNAMIC_CODECS=vp9`) and
 requires byte-identical native output, exact MD5 from one VA process across

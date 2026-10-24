@@ -47,6 +47,26 @@ executable(
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: the stable-buffer
+# allocation chain (MSM cached-coherent, MSM write-combined, system DMA heap).
+# Every rung needs an MSM render node, and the fallthroughs are only reached
+# when the earlier ones are refused, so the probe runs under the fault shim
+# below. Covers docs/architecture.md §3.4.
+executable(
+  'iris-alloc-probe',
+  'iris-alloc-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
+# The shim the probe loads with LD_PRELOAD: it refuses MSM GEM allocations so
+# the driver's retry and fallthrough run on real hardware.
+shared_module(
+  'alloc-fault',
+  'alloc-fault.c',
+  dependencies: [libdrm_dep],
+  c_args: ['-Wall', '-Wextra'],
+  name_prefix: '')
+
 # Client memory (DRM_PRIME_2 / PRIME_1) accepted only in the CAPTURE layout,
 # and the one definition of that layout. No hardware.
 prime_import_test = executable(

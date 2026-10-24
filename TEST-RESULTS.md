@@ -3427,3 +3427,44 @@ the CPU, not a claim about a browser session: a browser that plays at 30 fps
 spends most of the time idle and the saving is smaller and noisier, which is
 why the paced numbers above cannot resolve it. The gauge measures the whole
 device; there is no per-block telemetry on this SoC.
+
+## Stable-buffer allocation chain (2026-10-24)
+
+The chain in §3.4 — MSM GEM cached-coherent, MSM GEM write-combined, system
+DMA heap — had no test. The last rung is only reached when the first two are
+refused, and no ordinary run refuses them, so `test/iris-alloc-chain.sh` runs
+`test/iris-alloc-probe` under `test/alloc-fault.so`, an `LD_PRELOAD` shim
+that returns `EINVAL` (or `ENOMEM`) from the MSM GEM allocations it is told
+to refuse and logs every attempt.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `3cfaa7e` plus the
+working-tree change, build tree `build-alloc` (probe
+`1c71e250dba9…`, shim `0baefc4243…`), render node `/dev/dri/renderD128`
+resolved from the display's DRM render fd. Four modes, each a fresh process:
+
+| Mode | Injected | Resulting origin | Attempts logged |
+| --- | --- | --- | --- |
+| `no-fault` | nothing | MSM cached-coherent | — |
+| `coherent` | coherent → EINVAL | MSM write-combined | `coherent-einval wc-ok` |
+| `both` | coherent and WC → EINVAL | system DMA heap | `coherent-einval wc-einval` |
+| `coherent-enomem` | coherent → ENOMEM | system DMA heap | `coherent-enomem` |
+
+`coherent-enomem` is the one that pins a correctness rule rather than a
+memory preference: `msm_alloc.c` masks only `EINVAL` and `EOPNOTSUPP`, so a
+real failure must not be retried write-combined. The log shows no `wc` attempt
+at all in that mode.
+
+Every mode also asserted that the buffer covers the CAPTURE layout and that a
+pattern written to its chroma plane reads back unchanged across a
+`DMA_BUF_IOCTL_SYNC` pair, so a fallback rung is real memory and not just a
+successfully returned fd.
+
+Two negative controls, both refused with exit 2 rather than reported as a
+pass: an injected mode with no shim loaded, and an injected mode with the shim
+loaded but `IRIS_TEST_ALLOC_FAULT` unset. Without them a pass could come from
+the fast path happening to work.
+
+This is not a Meson test: every rung but the last needs an MSM render node,
+and a host without one cannot run any of it. `meson test` (19/19) and
+`run-static-checks.sh` are unchanged by the addition.

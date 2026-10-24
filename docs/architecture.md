@@ -176,6 +176,15 @@ writes and also satisfies freedreno's linear import rules. One object, two
 layers, linear modifier; the fd, pitch and offsets never change for the
 surface's lifetime.
 
+The second rung is a retry only for an unsupported cache mode:
+`msm_alloc.c` masks `EINVAL` and `EOPNOTSUPP` and treats every other errno as
+a real failure, so a GEM allocation that fails with `ENOMEM` goes straight to
+the DMA heap rather than being retried write-combined. `iris-alloc-chain.sh`
+walks all three rungs on the target by running `iris-alloc-probe` under
+`alloc-fault.so`, which refuses the MSM allocations per mode; it asserts the
+resulting `MemoryOrigin` and the exact sequence of attempts, and refuses to
+run an injected mode without the shim.
+
 A surface created over client memory (`vaCreateSurfaces2` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` or the older `_DRM_PRIME`) does not
 allocate. `src/util/prime.cc` checks the descriptor against this layout and
@@ -596,7 +605,9 @@ Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 §3.4) is the same policy reached from the API. Its gates are `prime-import`
 (host: the layout and refusal rules) and `test/iris-va-import-probe.cc`
 (target: the surface aliases the client's bytes and a firmware encode reads
-them).
+them). The allocation chain behind those surfaces is gated on the target by
+`test/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
+below the first needs an MSM render node.
 
 ## 10. Invariants (the ones tests exist for)
 
@@ -697,6 +708,13 @@ them).
     engine builds each view from its own layout and copies `min(from, to)`;
     a path that used the destination's size for both failed the whole
     segment with `invalid buffer layout`.
+21. The write-combined GEM allocation is a retry for an unsupported cache
+    mode and for nothing else. `msm_alloc.c` masks `EINVAL` and
+    `EOPNOTSUPP` and propagates every other errno, so a real failure falls
+    straight to the DMA heap. Retrying on a real error would either mask it
+    or produce a buffer from a mode the caller asked not to use.
+    `iris-alloc-chain.sh` walks the chain on the target with a shim that
+    injects each failure, and asserts the exact sequence of attempts.
 
 ## 11. How work is divided
 
