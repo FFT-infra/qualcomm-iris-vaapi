@@ -92,6 +92,19 @@ if have_gpu_copy
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: whether a VA
+# client's descriptor count returns to its starting value across the surface
+# lifecycle it repeats. A leak of one fd per surface is invisible in a short
+# run and fatal in a long one, and the count comes from /proc/self/fd rather
+# than from the driver's own ledger.
+if va_drm_dep.found()
+  executable(
+    'iris-fd-leak-probe',
+    'iris-fd-leak-probe.cc',
+    dependencies: [iris_core_dep, va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Client memory (DRM_PRIME_2 / PRIME_1) accepted only in the CAPTURE layout,
 # and the one definition of that layout. No hardware.
 prime_import_test = executable(
