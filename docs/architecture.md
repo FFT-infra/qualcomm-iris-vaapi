@@ -246,20 +246,23 @@ Ordering facts learned on this firmware and kept verbatim:
   client needs (a P010 surface against an NV12 default). This is a contract
   requirement on its own; it is not what makes an in-context AV1 resolution
   change work — see the next bullet.
-- An in-context AV1 resolution change is not reliable on this firmware. With
-  the ioctl order identical to what `v4l2av1dec` issues (no `S_FMT`, drain to
-  the boundary `LAST`, `STREAMOFF`/`REQBUFS(0)`, re-read `G_FMT`, rebuild,
-  `STREAMON`), and with the kernel's sub-state machine byte-for-byte the same
-  (`0x22` -> `0x66` -> `0`), roughly two runs in three still stall: the
-  boundary access unit completes once with `ERROR|LAST`, no picture-type bit
-  and no payload, and the firmware then produces no picture for the new
-  segment at all. A run that works returns that same access unit a second
-  time with a real picture. Which branch the firmware takes is not visible to
-  userspace and does not correlate with anything this driver controls.
-  `TEST-RESULTS.md` records the measurements. Treat in-context DRC as
-  unqualified for AV1; the qualified path is the one clients already take by
-  default (FFmpeg recreates its VA context at a coded-size change, H.264
-  included).
+- An in-context AV1 resolution change works only if `CAPTURE` is streaming
+  before the rebuilt pool is queued. The kernel keeps a DRC boundary sub-state
+  (`DRC | DRC_LAST`) after the firmware's `PSC_LAST` and clears it inside
+  `iris_process_streamon_output`; a `CAPTURE` `QBUF` that reaches
+  `iris_vb2_buf_queue` while those bits are still set is not handed to the
+  firmware — the driver completes it on the spot as an empty
+  `V4L2_BUF_FLAG_LAST` buffer, which makes vb2 set `q->last_buffer_dequeued`
+  and turns every later `CAPTURE` `DQBUF` into `-EPIPE`. Queueing before
+  `STREAMON` therefore loses the whole new segment, and whether the race is
+  lost varies from run to run: the boundary access unit also completes once
+  with `ERROR|LAST`, and that is what makes the failure intermittent rather
+  than deterministic. `enter_streaming()` streams `CAPTURE` first, for both
+  Mmap and Import memories; `TEST-RESULTS.md` records 2 of 6 framemd5 runs
+  passing before the change and 44 of 44 after. In a passing run the boundary
+  access unit comes back a second time as `0x4009` (`KEYFRAME`, real pixels).
+  The kernel sub-state transitions (`0x16` -> `0x42` -> `0`) are the same in
+  both cases, which is why the defect could not be seen there.
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.

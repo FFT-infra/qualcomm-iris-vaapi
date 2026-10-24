@@ -3248,6 +3248,80 @@ override.
 Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
 (`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).
 
+## Correction (2026-10-24): the in-context DRC defect is in this driver
+
+The section above concluded that the intermittent AV1 resolution-change stall
+was "not addressable from this driver" because the firmware decides whether
+to decode the boundary access unit a second time. That conclusion was wrong.
+The empty `LAST` (`0x104001`) on the rebuilt pool is not the firmware
+declaring the queue finished — it is the kernel completing a `CAPTURE` `QBUF`
+on the client's behalf, and the driver controls when that `QBUF` happens.
+
+`iris_vb2_buf_queue` (`iris_vb2.c:313-328`) has a branch that fires when a
+`CAPTURE` buffer arrives while the instance still carries the DRC boundary
+sub-state (`IRIS_INST_SUB_DRC | IRIS_INST_SUB_DRC_LAST`): it does not hand
+the buffer to the firmware, it completes it on the spot with
+`V4L2_BUF_FLAG_LAST`, payload 0, and calls `v4l2_m2m_mark_stopped`. vb2 then
+sets `q->last_buffer_dequeued` (`videobuf2-v4l2.c:853-856`), and every later
+`DQBUF` returns `-EPIPE` (`videobuf2-core.c:2011`). The kernel clears that
+sub-state in exactly one place — `iris_process_streamon_output`
+(`iris_common.c:100-155`) — which is the `CAPTURE` `STREAMON` ioctl.
+
+`enter_streaming()` used to call `pool_.requeue_capture()` first and
+`device_->stream(Queue::Capture, true)` second, so the 32 pool `QBUF`s
+arrived before the sub-state was cleared. Why only two runs in three failed
+rather than all of them: the boundary access unit also completes once as
+`ERROR|LAST` (`0x104041`), and that completion takes the error path in
+`iris_vb2_buffer_done` (`iris_buffer.c:771-778`) which returns before it
+reaches the `V4L2_BUF_FLAG_LAST` test that would set
+`inst->last_buffer_dequeued`. The two orders therefore differ only by a few
+microseconds of interleaving, which is why `strace` made the run pass (it
+slows every ioctl) and why the kernel sub-state log looked identical in both
+outcomes (`0x16` -> `0x42` -> `0`).
+
+The fix reverses the two calls: `STREAMON` first, then the pool, for both
+Mmap and Import memories. `test/unit/session-test.cc` had asserted the old
+order ("the first picture's buffer went in before CAPTURE streamed") and now
+pins the new one.
+
+Framemd5 oracle, `resize-av1.mkv` (80 frames, one VA context, one
+1280x720 -> 854x480 change), `V4L2_VA_TRACE=1`, build tree
+`~/Lab/qualcomm-iris-vaapi/build-def/src`:
+
+| Build | Runs | 80/80 frames, exit 0 |
+| --- | --- | --- |
+| before (`7f5936e`) | 6 | 2 |
+| after (`c4e957d`) | 44 | 44 |
+
+The 44 are 6 + 10 + 16 + 12 across four sessions. In a passing run the
+boundary token completes as `0x4009` (KEYFRAME, real pixels) after the
+rebuilt pool streams, and the extra `0x104001` no longer appears; the single
+`0x104001` that remains in a passing log is the terminal EOS drain
+(`index=10`).
+
+Regression checks on the same build:
+
+- `test/iris-matrix.sh`: PASS h264, hevc, vp9, av1, all `content=frame-md5`,
+  48 frames each, `timeouts=0 drops=0`.
+- `test/iris-dynamic-resolution.sh`: PASS h264, `switches=100`,
+  `contexts=101`, byte-identical native output and exact MD5 across every
+  change.
+- `sh test/run-static-checks.sh` PASS; `meson test -C build-def`
+  19/19 OK, 0 Fail.
+
+Still open and unrelated to this fix: forcing `V4L2_VA_PUBLISH=copy` makes
+the same file fail at the first post-change picture with
+`gpu copy: invalid buffer layout`. `GpuBlitter::copy` builds both views from
+`to.width`/`to.height` (the destination surface's layout) while `from` is the
+new-resolution frame, so a client surface still at the old geometry trips
+`width <= layout.width` in `gpu_copy.cc:132`. The default path is Direct and
+does not reach it; the pre-fix build fails identically (3 of 3), so this is a
+separate pre-existing Copy-path defect, recorded here rather than fixed.
+
+Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` — `f-*.log` and `v-*.log`
+passing, `n-*.log`/`q-*.log` the before/after pair with the kernel trace,
+`pub-copy-*.log` the Copy-path defect.
+
 ## Codec conformance: Fluster on the installed package (2026-10-24)
 
 Fluster 0.8.0 (`pip install --user fluster-conformance`), run against the
