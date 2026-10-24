@@ -46,6 +46,15 @@ Two probes build with the tree and run on the target only:
   pollable pending fence on its destination after `glFlush()`. That is the
   window the probe above depends on; if it is not observable on a GPU, no
   probe can claim the wait mattered.
+- `test/iris-fd-leak-probe.cc <render-node> [cycles]`: whether the descriptor
+  count returns to its starting value across the surface lifecycle. Counts
+  `/proc/self/fd`, and with `IRIS_TEST_FD_LEAK=1` leaks on purpose to prove
+  the accounting can fail.
+- `test/iris-encode-quality.sh [encoder-node] [render-node]`: encode fidelity
+  against the source. Asserts the encode moved the Iris IRQ counter, the
+  stream decodes, every decoded frame matches a software decode, and both the
+  mean and the worst-frame SSIM against the source clear a floor that a blank
+  stream cannot.
 
 ## Qualcomm Iris codec matrix
 
