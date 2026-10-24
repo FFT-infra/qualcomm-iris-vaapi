@@ -3659,8 +3659,23 @@ old pattern finds nothing, the new pattern `"(^|:)${required}$"` finds all 14
 required tests and still rejects `session-nonexistent`. The workflow now also
 prints `meson --version`, so a future log names the version that ran.
 
-Nothing has run end to end in CI yet: a green run needs the owner to approve
-the workflow for the new push, because the PR is cross-repository.
+The fix landed as `ci: accept both meson test listing formats` and the next
+push went green on the fork, all twelve steps
+(`40080541955`, 41 s): configure, build, the inventory check, static checks,
+19/19 Meson tests, no undefined symbols, and provenance for
+`0b8ed1551b74…` / `6907a881…`.
+
+What stays red is the check on the pull request itself, and that is a
+permissions fact rather than a code one. `phxinyang/qualcomm-iris-vaapi`
+answers the fork-run API with `Must have admin rights to Repository` (HTTP
+403) for the only credential this workspace holds, which belongs to the fork
+owner. GitHub reports `action_required` and starts no job, so the PR shows no
+result at all. The same commit is fully exercised by the fork's `push` run;
+the two differ in the repository that records the check, not in the steps that
+run. The settings that would end it need the base repository's owner: either
+approve the run on the PR page, or change Settings → Actions → General → Fork
+pull request workflows to require approval only from first-time contributors,
+after which a push from this fork runs without a click.
 
 ## The launcher exports both nodes, and Chrome still decodes (2026-10-24)
 
