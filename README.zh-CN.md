@@ -137,77 +137,94 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
 
 ## 已知限制
 
-- **VP9 还在 GPU 拷贝路径上。** 一个 VP9 alt-ref 访问单元会解出两张图。只挂
-  一个缓冲区时，每遇到一次 alt-ref 会话就卡约 500 ms；挂两个时固件自己挑
-  缓冲区，大约四分之一的完成结果落错位置。要等翻译器做到一张图一个访问
-  单元之后才能换 Import。
-- **AV1 会压后一张图。** VA 不提供 `refresh_frame_flags`，翻译器只能等下一个
-  访问单元的参考表，才能知道这张图刷新了哪些槽位。客户端只要领先一张图解码
-  （FFmpeg 带滤镜或下载、Chrome 都是），就完全感觉不到。先提交一张图、再去
-  `vaSyncSurface` 等它、然后才提交下一张的客户端，会一直等到同步上限；流结束
-  时上限到期，压后的图按最后一帧释放，如果后面还有非帧内图，会以一个明确的
-  错误失败，而不是解出错像素。固件对隐藏帧（`show_frame=0`）不返回像素，会话
-  按解码顺序把它认出来并照常发布，因为 FFmpeg 之后会用 `show_existing_frame`
-  把它显示出来。因此 Import 仍然只走拷贝路径。AV1 Profile 0 同时覆盖 8-bit
-  和 10-bit 4:2:0，两种都声明：P010 还是 NV12 由固件按码流自己决定。film grain
-  合成会被拒绝，因为内核没有给用户态任何途径去要求固件做这件事。
-- **原版内核上 Chrome 走 Copy。** 没有解码顺序控制项时会话运行在显示顺序
-  模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空，Import 被拒绝。
-- **导入的 surface 必须符合 CAPTURE 布局。** 客户端 DMA-BUF 只要带 tiling
-  modifier、多于一个 object、用自己的 pitch，或者 chroma 不在规定偏移上，
-  `vaCreateSurfaces2` 一律返回 `VA_STATUS_ERROR_INVALID_PARAMETER`，而不是
-  解进错误的像素。PRIME_1 没有 modifier 字段，那里只能信
+下面每条都写清楚三件事：什么条件下发生，结果是什么，为什么。依赖内核的条件
+直接点名那个内核特性。
+
+- **VP9 走 GPU 拷贝路径。** 一个 VP9 alt-ref 访问单元会解出两张图。
+  - 只挂一个缓冲区时，每遇到一次 alt-ref，会话卡约 500 ms。
+  - 挂两个时，固件自己挑缓冲区，大约四分之一的完成结果落错位置。
+
+  因此翻译器做到一张图一个访问单元之前，驱动只能拷贝。
+- **AV1 会压后一张图。** VA 不提供 `refresh_frame_flags`，所以翻译器只能等
+  下一个访问单元的参考表，才知道这张图刷新了哪些槽位。
+  - 客户端领先一张图解码时（FFmpeg 带滤镜或下载、Chrome 都是），感觉不到
+    任何差别。
+  - 客户端先提交一张图、再 `vaSyncSurface` 等它、然后才提交下一张时，会等到
+    同步上限。流结束时上限到期，压后的图按最后一帧释放；后面如果还有非帧内
+    图，会以一个明确的错误失败，不会解出错像素。
+
+  固件对隐藏帧（`show_frame=0`）不返回像素。会话按解码顺序认出它并照常发布，
+  因为 FFmpeg 之后会用 `show_existing_frame` 把它显示出来。因此 Import 仍然
+  只走拷贝路径。AV1 Profile 0 同时覆盖 8-bit 和 10-bit 4:2:0，两种都声明：
+  P010 还是 NV12 由固件按码流自己决定。film grain 合成会被拒绝，因为内核没给
+  用户态任何途径要求固件做这件事。
+- **原版内核上 Chrome 走 Copy。** 解码顺序控制项来自内核补丁。没有它时会话
+  运行在显示顺序模式：同步等待有上限，超时后做一次 STOP/LAST/START 排空。
+  Import 在这个模式下被拒绝。
+- **导入的 surface 必须符合 CAPTURE 布局。** 这个布局是：一个 object、线性
+  modifier、驱动规定的 pitch、chroma 在规定偏移上。客户端 DMA-BUF 只要带
+  tiling modifier、多于一个 object、用自己的 pitch，或者 chroma 不在规定偏移
+  上，`vaCreateSurfaces2` 一律返回 `VA_STATUS_ERROR_INVALID_PARAMETER`，不会
+  解进错误的像素。PRIME_1 没有 modifier 字段，那里驱动只能信
   `VA_SURFACE_EXTBUF_DESC_ENABLE_TILING` 说的"线性"。
-- **Chrome 153 的 HEVC seek 回归，上游问题。** Chromium 153 默认打开了
-  `ExtendedVideoBitstreamValidation`，共用的 `H265Decoder` 把每次 seek 后的
+- **Chrome 153 有 HEVC seek 回归，这是上游缺陷。** Chromium 153 默认打开了
+  `ExtendedVideoBitstreamValidation`。共用的 `H265Decoder` 把每次 seek 后的
   第一个 SPS 当成配置变更，合成器会一直显示 seek 之前的画面。
   [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) 在 SM8150 上定位
   并提交了 [Chromium issue 563075803](https://issues.chromium.org/issues/563075803)。
-  本项目目标机跑的是 Chrome 152，没有复现；用 153 的话加
+  本项目没有复现，因为目标机跑的是 Chrome 152。用 153 的话，加
   `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
-  gen2 SoC 应该能用，但目前没有证据；Arch 打包提供了，没有验证过。
-- **按需 IDR 在目标机上是直接控制项，在 stock 内核上是挪 GOP。** 内核有这个
-  控制项时，请求直接写成 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`，用
-  `packaging/kernel/0003-*` 编出来的模块就是这种情况：同步帧和它的参数集都由
-  固件自己写。没带这个补丁的 stock 7.2.6 模块上，驱动把这一张图的 intra
-  period 设成 0，入队前改回去，并补上上一次的 SPS/PPS，因为固件只在自己写的
-  同步帧上带参数集。两种方式切点都在 `-force_key_frames` 要的位置；下一个自动
-  IDR 在这一次之后一个 GOP 处，而不是原来的排期上。走 GOP 那条路时每张请求
-  IDR 的图要多写一次控制项，所以逐帧都请求反而比直接开 intra-only 贵。
+  gen2 SoC 应该能用，但目前没有证据。Arch 打包提供了，没有验证过。
+- **按需 IDR 在目标机上是直接控制项，在 stock 内核上是挪 GOP。** 分两种
+  情况：
+  - 节点有 `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` 时，驱动直接写这个控制项。
+    用 `packaging/kernel/0003-*` 编出来的模块就属于这种情况，同步帧和它的
+    参数集都由固件自己写。
+  - 节点没有这个控制项时（stock 7.2.6 模块），驱动把这一张图的 intra period
+    设成 0，入队前改回去，并补上上一次的 SPS/PPS。固件只在自己写的同步帧上
+    带参数集。
+
+  两种方式的切点都在 `-force_key_frames` 要的位置。下一个自动 IDR 在这一次
+  之后一个 GOP 处，而不是原来的排期上。走 GOP 那条路时，每张请求 IDR 的图要
+  多写一次控制项。因此逐帧都请求反而比直接开 intra-only 贵。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。
 - **不支持 10-bit、VP9、AV1 编码。** 编码节点的 OUTPUT 队列只列 NV12 和
-  QC08C，HEVC Main10 和 VP9 Profile 2 喂不进去。
+  QC08C。因此 HEVC Main10 和 VP9 Profile 2 喂不进去。
 - **不声明 packed headers，所以打开编码器时没有 extradata。** SPS/PPS 由固件
-  自己写，驱动不会再把客户端那一份塞进去。FFmpeg 能处理：它报个警告，把参数
-  集留在码流里，再从第一个包提取 `avcC` / `hvcC`，所以直接输出 `.mp4` 是可用的
-  （H.264 的 extradata 43 字节，HEVC 124 字节）。GStreamer 的 VA 编码器要求
-  驱动至少声明一种 packed header，否则直接拒绝，因此 `vah264enc` /
-  `vah265enc` 用不了；FFmpeg 的 `h264_vaapi` / `hevc_vaapi` 可以。
-- **编码是流水线的，`-async_depth` 生效。** `vaEndPicture` 把图排进队列就返回，
-  码流由 `vaSyncBuffer` 在 coded buffer 上取（不调同步的客户端在
-  `vaMapBuffer` 时取）。FFmpeg 看到 `vaSyncBuffer` 就走异步路径，`-async_depth`
-  可以把编码器的四个输入槽全部用上：目标机上 1080p HEVC 从 depth 1 的 190 fps
-  升到 depth 4 的 372 fps，各档位输出逐字节相同。对输入 surface 调
-  `vaSyncSurface` 仍然有效，含义是同一张图的完成。VA context 的分辨率是固定的：
-  换分辨率要新建 context。
+  自己写，驱动不会再把客户端那一份塞进去。
+  - FFmpeg 能处理。它报个警告，把参数集留在码流里，再从第一个包提取
+    `avcC` / `hvcC`。所以直接输出 `.mp4` 是可用的：H.264 的 extradata 43
+    字节，HEVC 124 字节。
+  - GStreamer 的 VA 编码器更严格，驱动不声明任何 packed header 就直接拒绝。
+    因此 `vah264enc` / `vah265enc` 用不了。FFmpeg 的 `h264_vaapi` /
+    `hevc_vaapi` 可以。
+- **编码是流水线的，`-async_depth` 生效。** `vaEndPicture` 把图排进队列就
+  返回。码流由 `vaSyncBuffer` 在 coded buffer 上取；不调同步的客户端在
+  `vaMapBuffer` 时取。FFmpeg 看到 `vaSyncBuffer` 就走异步路径。因此
+  `-async_depth` 可以把编码器的四个输入槽全部用上：目标机上 1080p HEVC 从
+  depth 1 的 190 fps 升到 depth 4 的 372 fps，各档位输出逐字节相同。对输入
+  surface 调 `vaSyncSurface` 仍然有效，含义是同一张图的完成。VA context 的
+  分辨率是固定的，换分辨率要新建 context。
 - **不支持 multi-slice、tiles、ROI 和 `-max_frame_size`。** FFmpeg 请求这些
-  会直接报错，不会被静默忽略。驱动自己也守同样的规矩：picture 参数里
-  slice 多于一个、tiles、wavefront 编码、加权预测、scaling list、chroma QP
-  偏移、多个参考帧索引，一律返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。序列头由
-  固件写、参考结构和量化由固件定，交出一段没照做的流比直接失败更糟。
+  会直接报错。驱动不会静默忽略它们，自己守同样的规矩：picture 参数里 slice
+  多于一个、tiles、wavefront 编码、加权预测、scaling list、chroma QP 偏移、
+  多个参考帧索引，一律返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。序列头由固件写，
+  参考结构和量化由固件定。交出一段没照做的流，比直接失败更糟。
 - **slice 的去块滤波参数要么照做，要么报错。** VA 的 slice 参数是客户端唯一
-  能提出关掉滤波或调偏移量的地方；内核有这个控制项时，驱动把
+  能提出关掉滤波或调偏移量的地方。内核有这些控制项时，驱动把
   `disable_deblocking_filter_idc`、alpha/beta 转给
-  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA`（HEVC 有对应
-  的 tc/beta）。出厂 SM8550 内核没有这些控制项，固件永远按默认的 0/0 滤波，
-  所以这时任何非默认请求都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，而不是交出
-  一段没照做的流；加控制项的内核补丁在
-  [`packaging/kernel/`](packaging/kernel/README.md)。V4L2 里去块是每个 context
-  一个值，VA 里是每个 slice 一个值，取值只看第一个 slice，同一个 context 里
-  改动要新建 context。
+  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA`，HEVC 有对应的
+  tc/beta。
+  - 出厂 SM8550 内核没有这些控制项。这时固件永远按默认的 0/0 滤波，任何非
+    默认请求都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，不会交出一段没照做的流。
+  - 加控制项的内核补丁在
+    [`packaging/kernel/`](packaging/kernel/README.md)。
+
+  V4L2 里去块是每个 context 一个值，VA 里是每个 slice 一个值。驱动只看第一个
+  slice，同一个 context 里改动要新建 context。
 
 ## 开发
 

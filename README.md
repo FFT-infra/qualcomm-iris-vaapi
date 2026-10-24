@@ -62,17 +62,20 @@ geometry. A VA context that only returns bytes proves nothing.
   `v4l-utils` at runtime (the launcher finds the decoder node by driver name
   because the number moves between boots).
 - Any Linux distribution that can load a libva module. Fedora 44 is the
-  qualified one; Fedora and Arch packaging is provided.
-- Optionally, five Iris kernel changes (decode-order output, a 64-buffer
-  CAPTURE pool, the encoder loop-filter controls, the encoder's
-  `REQUEST_SYNC_FRAME` control and a timestamp on error completions) carried
-  rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
-  module-only build recipe. On a stock kernel the driver detects their
-  absence and still works; Chrome then gets a GPU copy per frame instead of
-  the zero-copy path, an encoder deblocking request other than the firmware
-  default is refused, a requested IDR moves the intra period instead of
-  asking firmware for a sync frame, and a corrupt picture is reported only
-  after a drain or a sync timeout instead of at once.
+  qualified one. Fedora and Arch packaging is provided.
+- Optional: five Iris kernel changes. They are decode-order output, a
+  64-buffer CAPTURE pool, the encoder loop-filter controls, the encoder's
+  `REQUEST_SYNC_FRAME` control, and a timestamp on error completions. They
+  are carried rebased in [`packaging/kernel/`](packaging/kernel/README.md),
+  with a module-only build recipe. On a stock kernel the driver detects
+  their absence and still works. The results of a stock kernel are:
+  - Chrome gets a GPU copy per frame, not the zero-copy path.
+  - The driver refuses an encoder deblocking request that is not the
+    firmware default.
+  - A requested IDR moves the intra period. The driver does not ask the
+    firmware for a sync frame.
+  - The driver reports a corrupt picture after a drain or a sync timeout.
+    It does not report it at once.
 
 ## Install and use
 
@@ -87,24 +90,29 @@ rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
 sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
-Arch uses `packaging/arch/PKGBUILD`. Both install the driver into libva's
-driver directory, an `msm_drv_video.so` symlink beside it, the
-`iris-vaapi-browser` launcher and a "Google Chrome (Iris VA-API)" desktop
-entry, plus an install manifest with the source commit and artifact hash.
-The symlink is what libva resolves on its own: this SoC reports
-`DRIVER=msm_dpu`, and without the alias a client that does not set
-`LIBVA_DRIVER_NAME` (`mpv`, VLC, GStreamer) opens no driver at all. Then
-launch Chrome from that desktop entry, or from a shell:
+Arch uses `packaging/arch/PKGBUILD`. Both packages install these files:
+
+- the driver, into libva's driver directory;
+- an `msm_drv_video.so` symlink beside it;
+- the `iris-vaapi-browser` launcher;
+- a "Google Chrome (Iris VA-API)" desktop entry;
+- an install manifest with the source commit and the artifact hash.
+
+The symlink is what libva resolves on its own. This SoC reports
+`DRIVER=msm_dpu`. Without the alias, a client that does not set
+`LIBVA_DRIVER_NAME` (`mpv`, VLC, GStreamer) opens no driver at all. To start
+Chrome, use the desktop entry, or a shell:
 
 ```sh
 iris-vaapi-browser --browser=chrome
 ```
 
-The launcher resolves the Iris node on every start, sets `LIBVA_DRIVER_NAME`
-for that process only and passes no Chrome feature overrides; Chrome's
-packaged defaults are what this project qualifies. Check the result in
-`chrome://media-internals` while a video plays: the decoder must read
-`VaapiVideoDecoder` with `kIsPlatformVideoDecoder: true`.
+The launcher resolves the Iris node on every start. It sets
+`LIBVA_DRIVER_NAME` for that process only, and it passes no Chrome feature
+overrides, because Chrome's packaged defaults are what this project
+qualifies. To check the result, open `chrome://media-internals` while a video
+plays. The decoder must read `VaapiVideoDecoder` with
+`kIsPlatformVideoDecoder: true`.
 
 From a checkout instead of a package:
 
@@ -159,98 +167,120 @@ is usable as an encode input as well.
 
 ## Known limits
 
-- **VP9 stays on the GPU copy path.** A VP9 alt-ref access unit decodes as
-  two pictures. With one buffer in flight the session stalls about 500 ms
-  per alt-ref; with two, the firmware chooses the buffer itself and about a
-  quarter of the completions land in the wrong one. Copy until the
-  translator submits one access unit per picture.
-- **AV1 holds one picture.** VA carries no `refresh_frame_flags`, so the
-  translator keeps each AV1 picture until the next access unit's reference
-  map names the slots it refreshed. A client that decodes with a lead of one
-  picture (FFmpeg with any filter or download, Chrome) never notices. A
-  client that submits one picture and then syncs its surface before
-  submitting the next waits for the sync bound; at end of stream that bound
-  expires and the held picture is released as final, and a following
-  non-intra picture fails with a clear error instead of decoding wrong.
-  The firmware also returns a hidden (`show_frame=0`) picture without pixels;
-  the session attributes it by decode order and publishes it, because
-  FFmpeg shows it later through `show_existing_frame`. Import therefore
-  stays on the copy path. AV1 Profile 0 covers 8- and 10-bit 4:2:0, and both
-  are advertised: the firmware picks P010 or NV12 from the stream, and film
-  grain synthesis is refused because the kernel gives userspace no way to
-  ask the firmware for it.
-- **Stock kernel means Copy for Chrome.** Without the decode-order control
-  the session runs in display-order mode: bounded sync waits plus one
-  STOP/LAST/START drain on timeout, and Import is refused.
-- **Imported surfaces must match the CAPTURE layout.** A client DMA-BUF with
-  a tiled modifier, more than one object, a pitch of the client's choosing or
-  a chroma plane at a different offset is refused at `vaCreateSurfaces2` with
-  `VA_STATUS_ERROR_INVALID_PARAMETER` rather than decoded into the wrong
-  pixels. PRIME_1 has no modifier field; there the driver trusts
-  `VA_SURFACE_EXTBUF_DESC_ENABLE_TILING` to say the buffer is linear.
-- **Chrome 153 HEVC seek regression, upstream.** Chromium 153 turned on
-  `ExtendedVideoBitstreamValidation`, and its shared `H265Decoder` treats
-  the first SPS after every seek as a configuration change, so the
-  compositor keeps showing pre-seek frames. Reported and bisected by
-  [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) on SM8150, filed
-  as [Chromium issue 563075803](https://issues.chromium.org/issues/563075803).
-  Not reproduced here because the target runs Chrome 152; on 153, launch
-  with `--disable-features=ExtendedVideoBitstreamValidation` or stay on 152.
-- **One qualified device.** Everything above was measured on one SM8550
-  tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
-  packaging is provided but not validated.
-- **On-demand IDR is a direct control on the target, a GOP move on a stock
-  kernel.** A requested IDR is written as
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when the node has it, which the
-  module built from `packaging/kernel/0003-*` does: firmware writes the sync
-  frame and its parameter sets itself. Without that patch (a stock 7.2.6
-  module) the driver sets the intra period to zero for that one picture,
-  puts it back before queueing, and prefixes the last SPS/PPS because the
-  firmware only writes them on its own sync frames. Both shapes cut where
-  `-force_key_frames` asks, and the next automatic IDR is one GOP after the
-  requested one rather than on the original schedule. On the GOP path the
-  lever is a control write per requested picture, so a request on every
-  frame costs more than a plain intra-only stream.
-- **No B-frames.** The kernel allows at most one, and a delayed CAPTURE would
-  break the one-in-one-out model. A context whose sequence parameters ask for
-  `ip_period > 1` fails with `VA_STATUS_ERROR_INVALID_PARAMETER`.
+Each limit below states the condition, the result, and why. Where a limit
+depends on the kernel, the condition names the kernel feature.
+
+- **VP9 uses the GPU copy path.** One VP9 alt-ref access unit decodes as two
+  pictures. If one buffer is in flight, the session stalls about 500 ms per
+  alt-ref. If two buffers are in flight, the firmware chooses the buffer
+  itself, and about a quarter of the completions land in the wrong buffer.
+  The driver therefore copies until the translator can submit one access
+  unit per picture.
+- **AV1 holds one picture.** VA carries no `refresh_frame_flags`. For this
+  reason the translator keeps each AV1 picture until the next access unit's
+  reference map names the slots that the picture refreshed.
+  - If the client decodes with a lead of one picture, the client never
+    notices. FFmpeg with any filter or download does this, and so does
+    Chrome.
+  - If the client submits one picture and then syncs its surface before it
+    submits the next picture, the client waits for the sync bound. At end of
+    stream that bound expires. The held picture is then released as final,
+    and a following non-intra picture fails with a clear error. It does not
+    decode wrong.
+  The firmware also returns a hidden (`show_frame=0`) picture with no
+  pixels. The session attributes it by decode order and publishes it,
+  because FFmpeg shows it later through `show_existing_frame`. Import
+  therefore stays on the copy path. AV1 Profile 0 covers 8- and 10-bit
+  4:2:0, and the driver advertises both: the firmware picks P010 or NV12
+  from the stream. Film grain synthesis is refused, because the kernel gives
+  userspace no way to ask the firmware for it.
+- **A stock kernel means Copy for Chrome.** The decode-order control comes
+  from the kernel patch. Without it the session runs in display-order mode:
+  bounded sync waits, plus one STOP/LAST/START drain on timeout. Import is
+  refused in this mode.
+- **An imported surface must match the CAPTURE layout.** This layout is:
+  one object, a linear modifier, the driver's pitch, and the chroma plane at
+  the driver's offset. If a client DMA-BUF has a tiled modifier, more than
+  one object, a pitch of the client's choosing, or a chroma plane at a
+  different offset, `vaCreateSurfaces2` refuses it with
+  `VA_STATUS_ERROR_INVALID_PARAMETER`. The driver does not decode into the
+  wrong pixels. PRIME_1 has no modifier field, so there the driver trusts
+  `VA_SURFACE_EXTBUF_DESC_ENABLE_TILING` to say that the buffer is linear.
+- **Chrome 153 has an HEVC seek regression. This is an upstream defect.**
+  Chromium 153 turned on `ExtendedVideoBitstreamValidation`. Its shared
+  `H265Decoder` treats the first SPS after every seek as a configuration
+  change, so the compositor keeps showing pre-seek frames.
+  [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) reported and
+  bisected it on SM8150, and filed it as
+  [Chromium issue 563075803](https://issues.chromium.org/issues/563075803).
+  This project did not reproduce it, because the target runs Chrome 152. On
+  Chrome 153, launch with
+  `--disable-features=ExtendedVideoBitstreamValidation`, or stay on 152.
+- **One device is qualified.** All results above come from one SM8550
+  tablet. Other Iris gen2 SoCs should work, but they carry no evidence yet.
+  Arch packaging is provided but not validated.
+- **An on-demand IDR is a direct control on the target, and a GOP move on a
+  stock kernel.** The two cases are:
+  - If the node has `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, the driver writes
+    that control. The module built from `packaging/kernel/0003-*` has it. The
+    firmware then writes the sync frame and its parameter sets itself.
+  - If the node does not have that control (a stock 7.2.6 module), the driver
+    sets the intra period to zero for that one picture, puts the period back
+    before it queues the picture, and prefixes the last SPS/PPS. The
+    firmware writes SPS/PPS only on its own sync frames.
+
+  Both cases cut where `-force_key_frames` asks. The next automatic IDR
+  arrives one GOP after the requested one, not on the original schedule. On
+  the GOP path the lever is one control write per requested picture. For
+  this reason a request on every frame costs more than a plain intra-only
+  stream.
+- **No B-frames.** The kernel allows at most one B-frame, and a delayed
+  CAPTURE would break the one-in-one-out model. A context whose sequence
+  parameters ask for `ip_period > 1` fails with
+  `VA_STATUS_ERROR_INVALID_PARAMETER`.
 - **No 10-bit, VP9 or AV1 encode.** The encoder OUTPUT queue enumerates NV12
-  and QC08C only, so HEVC Main10 and VP9 Profile 2 cannot be fed.
+  and QC08C only. The driver therefore cannot feed HEVC Main10 or VP9
+  Profile 2.
 - **No packed headers, so no extradata at open time.** The firmware writes
-  SPS/PPS itself and the driver refuses to echo a second set. FFmpeg copes:
-  it warns, carries the parameter sets in-band, and extracts `avcC`/`hvcC`
-  from the first packet, so `.mp4` output works directly (43 bytes of
-  extradata for H.264, 124 for HEVC). GStreamer's VA encoder is stricter and
-  refuses a driver that advertises no packed headers at all, so `vah264enc`
-  and `vah265enc` do not work; FFmpeg's `h264_vaapi`/`hevc_vaapi` do.
-- **Encode is pipelined, `-async_depth` works.** `vaEndPicture` queues the
-  picture and returns; the access unit arrives through `vaSyncBuffer` on the
-  coded buffer (or through `vaMapBuffer` for a client that never syncs).
-  FFmpeg sees `vaSyncBuffer` and switches to its asynchronous path, so
-  `-async_depth` pipelines up to the four encoder input slots: 1080p HEVC on
-  the target goes from 190 fps at depth 1 to 372 fps at depth 4, with
-  byte-identical output at every depth. `vaSyncSurface` on the input surface
-  still works and means the same picture's completion. A VA context has a
-  fixed geometry: changing resolution needs a new context.
+  SPS/PPS itself, and the driver refuses to echo a second set.
+  - FFmpeg copes. It warns, carries the parameter sets in-band, and extracts
+    `avcC`/`hvcC` from the first packet. `.mp4` output therefore works
+    directly: 43 bytes of extradata for H.264, and 124 for HEVC.
+  - GStreamer's VA encoder is stricter. It refuses a driver that advertises
+    no packed headers at all. For this reason `vah264enc` and `vah265enc` do
+    not work. FFmpeg's `h264_vaapi` and `hevc_vaapi` do work.
+- **Encode is pipelined, and `-async_depth` works.** `vaEndPicture` queues
+  the picture and returns. The access unit arrives through `vaSyncBuffer` on
+  the coded buffer, or through `vaMapBuffer` for a client that never syncs.
+  FFmpeg sees `vaSyncBuffer` and switches to its asynchronous path. For this
+  reason `-async_depth` pipelines up to the four encoder input slots: 1080p
+  HEVC on the target goes from 190 fps at depth 1 to 372 fps at depth 4,
+  with byte-identical output at every depth. `vaSyncSurface` on the input
+  surface still works, and it means the same picture's completion. A VA
+  context has a fixed geometry, so a resolution change needs a new context.
 - **No multi-slice, tiles, ROI or `-max_frame_size`.** FFmpeg fails those
-  requests loudly; they are not silently ignored. The driver has the same
-  rule: more than one slice in the picture parameters, tiles, wavefront
-  coding, weighted prediction, scaling lists, chroma QP offsets and several
-  reference indexes are `VA_STATUS_ERROR_UNIMPLEMENTED`, because the
-  firmware writes the sequence headers, owns the reference structure and
-  picks the quantisation, and a stream that quietly used something else
-  would be worse than a failure.
-- **Slice deblocking is forwarded, or refused.** The VA slice parameters are
-  the client's one chance to ask for filtering to be off or throttled, and
-  the driver forwards them to
-  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (and the HEVC
-  equivalents) when the kernel has them. The stock SM8550 kernel does not,
-  and there the firmware always filters with the default 0/0 offsets, so any
-  other request fails with `VA_STATUS_ERROR_UNIMPLEMENTED` instead of coming
-  back as a stream that ignores it. [`packaging/kernel/`](packaging/kernel/README.md)
-  carries the kernel patch that adds the controls. Deblocking is per-context
-  in V4L2 and per-slice in VA, so it is read from the first slice and changing
-  it mid-context needs a new context.
+  requests loudly. The driver does not ignore them silently. The driver has
+  the same rule: it fails with `VA_STATUS_ERROR_UNIMPLEMENTED` when the
+  picture parameters carry more than one slice, tiles, wavefront coding,
+  weighted prediction, scaling lists, chroma QP offsets, or several
+  reference indexes. The firmware writes the sequence headers, owns the
+  reference structure and picks the quantisation. A stream that quietly used
+  something else would be worse than a failure.
+- **The driver forwards slice deblocking, or refuses it.** The VA slice
+  parameters are the client's one chance to ask for filtering to be off or
+  throttled. The driver forwards them to
+  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` and the HEVC
+  equivalents when the kernel has those controls.
+  - The stock SM8550 kernel does not have them. There the firmware always
+    filters with the default 0/0 offsets, so any other request fails with
+    `VA_STATUS_ERROR_UNIMPLEMENTED`. It does not come back as a stream that
+    ignores the request.
+  - [`packaging/kernel/`](packaging/kernel/README.md) carries the kernel
+    patch that adds the controls.
+
+  Deblocking is per-context in V4L2 and per-slice in VA. The driver
+  therefore reads it from the first slice, and a mid-context change needs a
+  new context.
 
 ## Development
 
