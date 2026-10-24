@@ -146,12 +146,17 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   straight into its `StableBuffer`, which is queued into a CAPTURE pool in
   DMABUF memory for exactly that picture. It requires decode-order output,
   a client buffer whose layout equals the CAPTURE layout, **one client
-  buffer in flight at a time** and **no holes** (a released picture still
+  picture in flight at a time** and **no holes** (a released picture still
   gets its buffer): the firmware picks which queued buffer a picture lands
   in, so only an empty choice is a determined one, and a missing buffer
   shifts every later picture into a neighbour's. A completion whose token
   does not match its buffer's token fails both surfaces and is never
-  published. Measured scope and failures: TEST-RESULTS.md, 2026-09-22.
+  published. The window is one *picture*, not one buffer: an access unit the
+  firmware decodes as several pictures (a VP9 alt-ref superframe) gets its
+  client buffer queued once per completion before the first one returns, so
+  the firmware still chooses only between the same picture's memory and
+  never stalls waiting for somewhere to put the second half. Measured scope
+  and failures: TEST-RESULTS.md, 2026-09-22.
 
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
@@ -208,7 +213,7 @@ Client-owned CAPTURE buffers (true zero-copy for Chrome) left the research
 track on 2026-09-22 and became the Import publish policy above. The §9
 acceptance program found that the firmware does *not* fill CAPTURE buffers
 in QBUF order (`test/iris-import-probe.cc`, results in TEST-RESULTS.md);
-the policy exists because the session queues exactly one client buffer at a
+the policy exists because the session queues exactly one client picture at a
 time and never skips a submitted picture. Creating a surface over client
 memory is not the path that went: it allocates nothing (§3.4) and enters the
 same policy from the API.
@@ -354,13 +359,44 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding 
   sizes the coded queue from the current controls, so `configure` re-sets
   the CAPTURE format after the controls and before `REQBUFS`; a format set
   earlier leaves buffers that `QBUF` rejects with `EINVAL` at 1080p.
-- `VAConfigAttribEncPackedHeaders` stays `VA_ATTRIB_NOT_SUPPORTED`. The
-  firmware writes SPS/PPS and the encoder node has no path that accepts a
-  client's parameter sets, so advertising the attribute would promise to
-  honour buffers the driver can only ignore. FFmpeg tolerates it and still
-  extracts `avcC`/`hvcC` from the first packet; GStreamer's VA encoder
-  refuses to start at all, which is the price of not advertising. Anything
-  that does need packed headers is a separate change with its own evidence.
+- `VAConfigAttribEncPackedHeaders` answers `VA_ENC_PACKED_HEADER_NONE`, not
+  `VA_ATTRIB_NOT_SUPPORTED`. The firmware writes SPS/PPS and the encoder node
+  has no path that accepts a client's parameter sets, so advertising a
+  packed-header flag would promise to honour buffers the driver can only
+  ignore. Zero says the attribute is known and no packed header is accepted,
+  which is the truth; `VA_ATTRIB_NOT_SUPPORTED` says the client may not ask at
+  all, and GStreamer's `gst_va_display_get_packed_headers` returns -1 on it,
+  which stops `vah264enc`/`vah265enc` before the first frame. FFmpeg
+  tolerates either and still extracts `avcC`/`hvcC` from the first packet.
+  `VAConfigAttribEncMaxSlices` answers 1 for the same reason: GStreamer
+  clamps its slice count to it, and a `NOT_SUPPORTED` answer makes it compute
+  -1. Anything that does need real packed headers is a separate change with
+  its own evidence.
+- The picture contract is checked in the codec translators, not assumed. The
+  firmware has one reference frame and one picture-type lever, so a request
+  it cannot honour fails instead of producing a stream that silently used
+  something else:
+  - A non-IDR I picture, and an HEVC CRA, become an IDR request. Iris'
+    `FORCE_KEY_FRAME` emits an IDR, so the alternative is the firmware
+    coding the picture as a P and misordering the stream. FFmpeg submits
+    this shape when `-idr_interval` is above zero: `hw_base_encode.c` emits
+    `FF_HW_PICTURE_TYPE_I` for the GOP boundaries between IDRs
+    (`gop_per_idr = idr_interval + 1`), `vaapi_encode_h264.c` then sets
+    `slice_type = 7` with `idr_pic_flag = 0`, and `vaapi_encode_h265.c`
+    uses `HEVC_NAL_CRA_NUT` the same way. The interval defaults to 0, so a
+    plain `-g` run never reaches this path.
+  - An inter picture must name the previous picture's reconstruction
+    surface in `RefPicList0[0]` / `ref_pic_list0[0]`, and that entry must not
+    be invalid or long-term. The session holds `last_reconstruction_` and
+    compares; a mismatch is `VA_STATUS_ERROR_UNIMPLEMENTED`.
+  - A stream must start on an intra picture, and a picture with
+    `reference_pic_flag` clear is refused: the firmware keeps the previous
+    reconstruction and nothing else, so a non-reference picture would break
+    the only reference the next one can name.
+  - One full-picture slice only: `macroblock_address` /
+    `slice_segment_address` at zero and the slice covering the whole picture
+    (`num_ctu_in_slice` for HEVC). B slices are refused, and so is an HEVC
+    `coding_type` that disagrees with the slice type.
 - A stock SM8550 module (kernel branch 7.2.6 without the patches) exposes no
   `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`v4l2-ctl -d <encoder>
   --list-ctrls` shows the GOP size and the QP controls, no key-frame
@@ -457,6 +493,14 @@ test/
                       iris-va-import-probe.cc the same memory entered through
                       vaCreateSurfaces2
   remote/             deploy, provenance, cdp
+scripts/
+  lib/iris-node.sh    the only place the node-resolution rule lives; sourced by
+                      both diagnostics, so neither can drift from the other
+  iris-device-check.sh  read-only device report (nodes, firmware, driver hash,
+                      coded formats, optional kernel controls, libva probe)
+  iris-verify.sh      user-facing decode/encode check against the IRQ counter
+  iris-configure-clients.sh  opt-in mpv/Firefox configuration in one user's home
+  install-system.sh / uninstall-system.sh  the one install path both packages use
 ```
 
 `va/` may include `iris/` and `codec/`; `iris/` and `codec/` never include
@@ -543,7 +587,12 @@ session failed: <reason>
 session finish submitted=<n> completed=<n> errors=<n> drops=<n> timeouts=<n> drains=<n> misplaced=<n>
 event source-change state=<n>
 output error token=<n> output=<i>
-import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1
+import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1 lent=<n>/<n>
+                                                     (lent counts this
+                                                      picture's buffers with
+                                                      the firmware; a VP9
+                                                      alt-ref superframe
+                                                      reaches 2/2)
 import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n> chroma=<n> size=<n>)
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
@@ -560,7 +609,14 @@ va end_picture ctx=<n> surface=<n> deferred                     (AV1: the pictur
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
-encode frame index=<n> bytes=<n> idr=0|1
+encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
+                                                       client's idr_pic_flag and
+                                                       an intra picture without
+                                                       it; promoted=1 marks the
+                                                       second case, which is the
+                                                       only record that the
+                                                       request was rewritten
+                                                       rather than honoured)
 encode input fence fd=<n> waited=<ms>                 (only when the input's
                                                        write fence was pending
                                                        20 ms or longer)
@@ -601,7 +657,7 @@ Research track, resolved 2026-09-22: client-owned CAPTURE buffers.
 `test/iris-import-probe.cc` is the acceptance program; it proved that the
 firmware does not honour QBUF order when it has several buffers to choose
 from (246/360 wrong under the doc's original model), and the Import policy
-is the deformation that survives that finding (one buffer in flight, no
+is the deformation that survives that finding (one picture in flight, no
 holes). Results and the VP9 open failure: TEST-RESULTS.md.
 
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
@@ -635,10 +691,11 @@ below the first needs an MSM render node.
    picture exactly that way, and invariant 18 is what tells them apart.
    With the error-timestamp patch a marker keeps its token and fails that
    surface immediately; the token-less form is the stock kernel's.
-9. Import keeps exactly one client buffer with the firmware at a time, and
-   every submitted picture gets its buffer even after its surface was
-   released; a completion whose token does not match its buffer's token
-   fails both surfaces and is counted as `misplaced`.
+9. Import keeps exactly one client *picture* with the firmware at a time —
+   one buffer per completion it produces — and every submitted picture gets
+   its buffer even after its surface was released; a completion whose token
+   does not match its buffer's token fails both surfaces and is counted as
+   `misplaced`.
 10. An encoded picture lands only in the coded buffer the client named in
     `VAEncPictureParameterBuffer{H264,HEVC}::coded_buf`, and only once its
     ticket is claimed (`vaSyncBuffer`, `vaSyncSurface`, or the `vaMapBuffer`
@@ -666,13 +723,17 @@ below the first needs an MSM render node.
     reference indexes — the firmware writes the sequence headers, owns the
     reference structure and chooses the quantisation, so none of them can be
     forwarded. Deblocking additionally cannot change inside a live context.
-14. An encode picture is a requested IDR only when the bitstream says so: the
-    session uses `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when the kernel has
-    it, and otherwise pulls the intra period to zero for that picture and
-    puts it back before queueing it — restoring after the completion made
-    the following picture an IDR as well. The lever is never skipped,
-    because a driver-side guess at the firmware's own GOP schedule dropped
-    requests. `idr=1` in the trace is the request.
+14. An encode picture is a requested IDR when the client asked for one, and
+    also when the client asked for an intra picture without the IDR flag (a
+    non-IDR I picture, or an HEVC CRA): the firmware's only lever emits an
+    IDR, so the request is promoted rather than dropped, which would code
+    the picture as a P. The session uses
+    `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when the kernel has it, and
+    otherwise pulls the intra period to zero for that picture and puts it
+    back before queueing it — restoring after the completion made the
+    following picture an IDR as well. The lever is never skipped, because a
+    driver-side guess at the firmware's own GOP schedule dropped requests.
+    `idr=1` in the trace is the request.
 15. An encode timestamp rises strictly: the session rate is fixed at
     configuration time and each picture advances by one frame duration. VA
     clients send the frame rate only with IDR pictures, and a timestamp
@@ -723,6 +784,21 @@ below the first needs an MSM render node.
     or produce a buffer from a mode the caller asked not to use.
     `iris-alloc-chain.sh` walks the chain on the target with a shim that
     injects each failure, and asserts the exact sequence of attempts.
+22. An encode stream starts on an intra picture, and every inter picture
+    names the immediately preceding picture's reconstruction surface as its
+    only L0 reference. The firmware keeps one reconstructed frame and has no
+    reference management of its own, so `last_reconstruction_` in the session
+    is both the one legal reference and the check: a reference to anything
+    else is `VA_STATUS_ERROR_UNIMPLEMENTED`. A picture with
+    `reference_pic_flag` clear is refused for the same reason — the next
+    picture could only name it, and it will not be there.
+23. An encode slice covers the whole picture and is the only one. The
+    translator requires `macroblock_address` / `slice_segment_address` at
+    zero, `num_macroblocks` at the sequence's macroblock count /
+    `num_ctu_in_slice` at the CTU grid, I or P slice type only, and an IDR
+    paired with an I slice. An HEVC `coding_type` that disagrees with the
+    slice type is `VA_STATUS_ERROR_INVALID_PARAMETER`. The firmware decides
+    the slice layout, so a partial slice would code a partial frame.
 
 ## 11. How work is divided
 

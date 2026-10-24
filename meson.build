@@ -57,16 +57,20 @@ va_driver_init_func = '__vaDriverInit_@0@_@1@'.format(va_api_major_version, va_a
 subdir('src')
 subdir('test')
 
-# Packaging with --prefix=/usr installs the driver, process-scoped browser
-# launcher and desktop entries together. For direct system deployment, the
-# install-system.sh helper additionally reads libva's canonical driverdir so
-# a /usr/local project prefix cannot hide the driver from libva.
+# Packaging with --prefix=/usr installs the diagnostic commands and the node
+# rule they share. There is no launcher and no desktop entry: libva resolves
+# the driver through the msm_drv_video.so alias, so a client needs neither.
+# For direct system deployment, the install-system.sh helper additionally
+# reads libva's canonical driverdir so a /usr/local project prefix cannot hide
+# the driver from libva.
 install_data(
-	'scripts/iris-vaapi-browser',
-	install_dir: get_option('bindir'),
-	install_mode: 'rwxr-xr-x',
+	'scripts/lib/iris-node.sh',
+	install_dir: join_paths(get_option('datadir'), 'iris-vaapi'),
 )
 install_data(
-	'data/google-chrome-iris-v4l2.desktop',
-	install_dir: join_paths(get_option('datadir'), 'applications'),
+	'scripts/iris-device-check.sh',
+	'scripts/iris-verify.sh',
+	'scripts/iris-configure-clients.sh',
+	install_dir: get_option('bindir'),
+	install_mode: 'rwxr-xr-x',
 )

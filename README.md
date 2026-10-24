@@ -62,7 +62,15 @@ geometry. A VA context that only returns bytes proves nothing.
   `v4l-utils` at runtime (the launcher finds the decoder node by driver name
   because the number moves between boots).
 - Any Linux distribution that can load a libva module. Fedora 44 is the
-  qualified one. Fedora and Arch packaging is provided.
+  qualified one. Fedora and Arch packaging is provided; there is no Debian
+  or Ubuntu package, and those distributions are not qualified.
+  - On Debian and Ubuntu, building wants `libgbm-dev`, which is a Mesa
+    package pinned to an exact `libgbm1`. Installing it can downgrade a
+    vendor-patched graphics stack. The build only needs the headers,
+    `gbm.pc` and the `libgbm.so` link-time symlink, and Meson treats GBM as
+    optional: without it the driver builds with the CPU copy engine instead
+    of the GPU one. Either take those three pieces out of the `.deb` by hand
+    or build without GBM and accept the slower copy path.
 - Optional: five Iris kernel changes. They are decode-order output, a
   64-buffer CAPTURE pool, the encoder loop-filter controls, the encoder's
   `REQUEST_SYNC_FRAME` control, and a timestamp on error completions. They
@@ -94,25 +102,51 @@ Arch uses `packaging/arch/PKGBUILD`. Both packages install these files:
 
 - the driver, into libva's driver directory;
 - an `msm_drv_video.so` symlink beside it;
-- the `iris-vaapi-browser` launcher;
-- a "Google Chrome (Iris VA-API)" desktop entry;
+- `iris-device-check`, `iris-verify` and `iris-configure-clients`;
+- the node-resolution file those commands share;
 - an install manifest with the source commit and the artifact hash.
 
 The symlink is what libva resolves on its own. This SoC reports
 `DRIVER=msm_dpu`. Without the alias, a client that does not set
-`LIBVA_DRIVER_NAME` (`mpv`, VLC, GStreamer) opens no driver at all. To start
-Chrome, use the desktop entry, or a shell:
+`LIBVA_DRIVER_NAME` (`mpv`, VLC, GStreamer) opens no driver at all.
+
+There is no launcher and no desktop entry. Start Chrome the normal way:
 
 ```sh
-iris-vaapi-browser --browser=chrome
+google-chrome-stable
 ```
 
-The launcher resolves the Iris node on every start. It sets
-`LIBVA_DRIVER_NAME` for that process only, and it passes no Chrome feature
-overrides, because Chrome's packaged defaults are what this project
-qualifies. To check the result, open `chrome://media-internals` while a video
-plays. The decoder must read `VaapiVideoDecoder` with
-`kIsPlatformVideoDecoder: true`.
+It needs no flags, no environment variable and no separate profile: libva
+finds the driver through the alias, and the node is resolved by the driver
+itself from the `iris_driver` name. `test/iris-browser-acceptance.sh` runs
+Chrome exactly that way, with `LIBVA_DRIVER_NAME` and both node overrides
+removed from the environment, and requires the GPU process to map this
+driver and hold the node. To check a session by hand, open
+`chrome://media-internals` while a video plays. The decoder must read
+`VaapiVideoDecoder` with `kIsPlatformVideoDecoder: true`.
+
+Two commands answer the rest before anything else is worth trying:
+
+```sh
+iris-device-check          # read-only: nodes, firmware, driver, codecs, which path
+iris-verify                # decode and encode, with the Iris IRQ counter
+```
+
+`iris-device-check` resolves both nodes through the launcher and reports the
+device-tree node, the bound driver, the module hash, the firmware, the coded
+formats each queue exposes, which optional kernel controls are present, and
+whether libva opens this driver with no environment set. `iris-verify`
+generates its own clip, checks that libva opens the driver unaided, that a
+decode and an encode each move the Iris interrupt counter, and that the
+encoded stream decodes. Neither writes anything outside a scratch directory.
+
+mpv and Firefox configuration is opt-in: `iris-configure-clients` writes
+`hwdec=vaapi` into the current user's `~/.config/mpv/mpv.conf` and sets
+`media.hardware-video-decoding.force-enabled` in the profile that
+`profiles.ini` names, backing up an existing mpv.conf first. It touches no
+`/etc` file and does not configure Chrome. The Firefox pref is the one that
+replaced `media.ffmpeg.vaapi.enabled` in Firefox 137; it has not been
+verified as a Firefox decode run on the qualified target.
 
 From a checkout instead of a package:
 
@@ -149,7 +183,7 @@ client's behaviour. The driver owns the CAPTURE pool.
   Adreno) from the driver's slot into a stable buffer whose file descriptor
   never changes. VP9 and stock kernels take this path.
 
-Import holds because of two measured rules: exactly one client buffer is
+Import holds because of two measured rules: exactly one client picture is
 with the firmware at a time, and no submitted picture is ever skipped. A
 completion that lands in a neighbour's buffer fails both surfaces instead of
 publishing. The contract, the state machine and the trace vocabulary are in
@@ -171,11 +205,14 @@ Each limit below states the condition, the result, and why. Where a limit
 depends on the kernel, the condition names the kernel feature.
 
 - **VP9 uses the GPU copy path.** One VP9 alt-ref access unit decodes as two
-  pictures. If one buffer is in flight, the session stalls about 500 ms per
-  alt-ref. If two buffers are in flight, the firmware chooses the buffer
-  itself, and about a quarter of the completions land in the wrong buffer.
-  The driver therefore copies until the translator can submit one access
-  unit per picture.
+  pictures. A window of one buffer stalls about 500 ms per alt-ref, because
+  the firmware will not return the invisible half before it has a slot for
+  the visible one. A window of two *pictures'* buffers lets the firmware
+  choose between them, and about a quarter of the completions land in the
+  wrong buffer. The session now lends one picture one buffer per completion
+  instead, which is a different thing: the firmware still chooses only
+  between the same picture's memory. That path has host tests but no
+  hardware gate yet, so the driver keeps copying for VP9.
 - **AV1 holds one picture.** VA carries no `refresh_frame_flags`. For this
   reason the translator keeps each AV1 picture until the next access unit's
   reference map names the slots that the picture refreshed.
@@ -233,7 +270,9 @@ depends on the kernel, the condition names the kernel feature.
   arrives one GOP after the requested one, not on the original schedule. On
   the GOP path the lever is one control write per requested picture. For
   this reason a request on every frame costs more than a plain intra-only
-  stream.
+  stream. A client that asks for an intra picture without the IDR flag —
+  FFmpeg does this — is treated as an IDR request, because the only lever
+  the firmware has emits an IDR.
 - **No B-frames.** The kernel allows at most one B-frame, and a delayed
   CAPTURE would break the one-in-one-out model. A context whose sequence
   parameters ask for `ip_period > 1` fails with
@@ -243,12 +282,18 @@ depends on the kernel, the condition names the kernel feature.
   Profile 2.
 - **No packed headers, so no extradata at open time.** The firmware writes
   SPS/PPS itself, and the driver refuses to echo a second set.
+  `VAConfigAttribEncPackedHeaders` answers `VA_ENC_PACKED_HEADER_NONE`, not
+  "unsupported": zero means the attribute is known and no packed header is
+  accepted, while `VA_ATTRIB_NOT_SUPPORTED` means the client cannot ask at
+  all.
   - FFmpeg copes. It warns, carries the parameter sets in-band, and extracts
     `avcC`/`hvcC` from the first packet. `.mp4` output therefore works
     directly: 43 bytes of extradata for H.264, and 124 for HEVC.
-  - GStreamer's VA encoder is stricter. It refuses a driver that advertises
-    no packed headers at all. For this reason `vah264enc` and `vah265enc` do
-    not work. FFmpeg's `h264_vaapi` and `hevc_vaapi` do work.
+  - GStreamer's VA encoder rejects a driver that answers
+    `VA_ATTRIB_NOT_SUPPORTED` there, because it cannot tell that from a
+    client error. Zero passes its check, so `vah264enc` and `vah265enc` get
+    past it. Whether they then produce a correct stream is not yet verified
+    on hardware.
 - **Encode is pipelined, and `-async_depth` works.** `vaEndPicture` queues
   the picture and returns. The access unit arrives through `vaSyncBuffer` on
   the coded buffer, or through `vaMapBuffer` for a client that never syncs.
@@ -266,6 +311,26 @@ depends on the kernel, the condition names the kernel feature.
   reference indexes. The firmware writes the sequence headers, owns the
   reference structure and picks the quantisation. A stream that quietly used
   something else would be worse than a failure.
+- **The picture contract is enforced, not assumed.** The firmware has one
+  reference frame and a single picture type lever, so the driver checks what
+  the client asked for against what the encoder can do:
+  - A non-IDR I picture, or an HEVC CRA, is promoted to an IDR request. Iris
+    exposes `FORCE_KEY_FRAME`, which emits an IDR; the alternative was coding
+    the picture as a P and misordering the stream. FFmpeg submits this shape
+    when `-idr_interval` is above zero: `hw_base_encode.c` emits
+    `FF_HW_PICTURE_TYPE_I` for the GOP boundaries between IDRs, and
+    `vaapi_encode_h264.c` then sends `slice_type = 7` with
+    `idr_pic_flag = 0`. The default interval is 0, so a plain `-g` run never
+    reaches the path.
+  - An inter picture must name the previous picture's reconstruction surface
+    in its reference list. Anything else fails with
+    `VA_STATUS_ERROR_UNIMPLEMENTED`.
+  - A stream must start on an intra picture, and a picture marked
+    non-reference is refused.
+  - Only one full-picture slice is accepted: `macroblock_address` /
+    `slice_segment_address` at zero and the slice covering the whole picture
+    (`num_ctu_in_slice` for HEVC). B slices, and an HEVC `coding_type` that
+    disagrees with the slice type, are refused.
 - **The driver forwards slice deblocking, or refuses it.** The VA slice
   parameters are the client's one chance to ask for filtering to be off or
   throttled. The driver forwards them to

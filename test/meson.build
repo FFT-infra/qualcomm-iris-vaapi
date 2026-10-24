@@ -178,5 +178,5 @@ test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh
      args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-browser-launcher-check', find_program('iris-browser-launcher-check.sh'),
+test('iris-node-check', find_program('iris-node-check.sh'),
      args: [meson.project_source_root()])

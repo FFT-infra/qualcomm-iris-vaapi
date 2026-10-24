@@ -55,7 +55,12 @@ entrypoint 的程序。
 - libva ≥ 1.1、libdrm ≥ 2.4.52；GPU 拷贝引擎需要 EGL/GLES/GBM；运行时需要
   `v4l-utils`（启动器按驱动名找解码节点，因为节点编号每次开机都会变）。
 - 任何能加载 libva 模块的 Linux 发行版。Fedora 44 是合格过的；提供 Fedora
-  和 Arch 的打包。
+  和 Arch 的打包。Debian / Ubuntu 没有包，也没做过合格验证。
+  - 在这两个发行版上编译会要 `libgbm-dev`，那是 Mesa 的包，锁死某个版本的
+    `libgbm1`，装上去可能把厂商改过的图形栈降级。编译实际只需要头文件、
+    `gbm.pc` 和链接期那个 `libgbm.so` 符号链接，而 Meson 把 GBM 当可选项：
+    没有它就编出走 CPU 拷贝的驱动，GPU 拷贝那条路不编进去。要么手工从
+    `.deb` 里取这三样，要么不装 GBM，接受慢一点的拷贝路径。
 - 可选：五项 Iris 内核改动（按解码顺序出帧、CAPTURE 池上限 64、编码器去块
   滤波控制项、编码器的 `REQUEST_SYNC_FRAME` 控制项、出错完成保留时间戳），已
   rebase 后放在 [`packaging/kernel/`](packaging/kernel/README.md)，附只重编模块
@@ -77,20 +82,37 @@ sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
 Arch 用 `packaging/arch/PKGBUILD`。两种包都会把驱动装进 libva 的驱动目录，
-旁边再放一个 `msm_drv_video.so` 符号链接，同时装上 `iris-vaapi-browser`
-启动器、一个 "Google Chrome (Iris VA-API)" 桌面项，以及记录源码提交和产物
-哈希的安装清单。这个链接是给 libva 自己找驱动用的：这颗 SoC 报的是
-`DRIVER=msm_dpu`，没有它，不设 `LIBVA_DRIVER_NAME` 的客户端（mpv、VLC、
-GStreamer）根本打不开驱动。之后从那个桌面项启动 Chrome，或者在终端里：
+旁边再放一个 `msm_drv_video.so` 符号链接，同时装上 `iris-device-check` /
+`iris-verify` / `iris-configure-clients` 三个诊断和配置命令、它们共用的节点解析
+文件，以及记录源码提交和产物哈希的安装清单。这个链接是给 libva 自己找驱动用的：
+这颗 SoC 报的是 `DRIVER=msm_dpu`，没有它，不设 `LIBVA_DRIVER_NAME` 的客户端
+（mpv、VLC、GStreamer）根本打不开驱动。
+
+没有启动器，也没有桌面项。Chrome 就按平常的方式启动：
 
 ```sh
-iris-vaapi-browser --browser=chrome
+google-chrome-stable
 ```
 
-启动器每次启动都重新解析 Iris 节点，只给这个进程设置 `LIBVA_DRIVER_NAME`，
-不加任何 Chrome feature 开关；本项目验收的就是 Chrome 打包时的默认配置。
-播放视频时打开 `chrome://media-internals` 看结果：解码器一栏必须是
-`VaapiVideoDecoder`，且 `kIsPlatformVideoDecoder: true`。
+不需要开关、不需要环境变量、也不需要单独的 profile：libva 靠那个符号链接找到
+驱动，节点由驱动自己按 `iris_driver` 名字解析。`test/iris-browser-acceptance.sh`
+就是这么跑的——把 `LIBVA_DRIVER_NAME` 和两个节点覆盖变量从环境里去掉，要求 GPU
+进程确实映射了本驱动并持有节点。手动确认时播放视频并打开
+`chrome://media-internals`：解码器一栏必须是 `VaapiVideoDecoder`，且
+`kIsPlatformVideoDecoder: true`。
+
+装完先跑这两个，再谈别的：
+
+```sh
+iris-device-check          # 只读：节点、固件、驱动、暴露的编解码、该走哪条路
+iris-verify                # 解码和编码各跑一遍，看 Iris 中断计数有没有动
+```
+
+`iris-verify` 会自己生成测试片源，不需要外部素材；它检查 libva 在没有任何环境
+变量时能不能打开驱动、解码和编码是否真的落在硬件上、编出来的流能不能解回来。
+mpv 和 Firefox 的配置是可选的，`iris-configure-clients` 只改当前用户自己的
+`~/.config/mpv/mpv.conf` 和 Firefox profile 里的 `user.js`，不碰 `/etc`，也不
+碰 Chrome。
 
 不打包、直接从源码树装：
 
@@ -122,9 +144,9 @@ LIBVA_DRIVERS_PATH=$PWD/build/src LIBVA_DRIVER_NAME=v4l2 vainfo   # 或者先这
 - **Copy**：同样是预先导出的 surface，由 GPU blit（Adreno 上的 EGL）从驱动
   的槽位拷进一块文件描述符永不变化的稳定缓冲区。VP9 和原版内核走这条。
 
-Import 靠两条实测出来的规则成立：同一时刻固件手里只有一个客户端缓冲区；
-已提交的图一张都不能跳过。完成结果落到邻居缓冲区里的话，两个 surface 一起
-判失败，不发布。契约、状态机和 trace 词表在
+Import 靠两条实测出来的规则成立：同一时刻固件手里只有一张客户端图（按它
+的完成次数各挂一个缓冲区）；已提交的图一张都不能跳过。完成结果落到邻居
+缓冲区里的话，两个 surface 一起判失败，不发布。契约、状态机和 trace 词表在
 [`docs/architecture.md`](docs/architecture.md)，测量数据在
 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
@@ -141,10 +163,13 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
 直接点名那个内核特性。
 
 - **VP9 走 GPU 拷贝路径。** 一个 VP9 alt-ref 访问单元会解出两张图。
-  - 只挂一个缓冲区时，每遇到一次 alt-ref，会话卡约 500 ms。
-  - 挂两个时，固件自己挑缓冲区，大约四分之一的完成结果落错位置。
+  - 只挂一个缓冲区时，每遇到一次 alt-ref，会话卡约 500 ms：固件拿不到放
+    第二张图的地方，就不返回第一张。
+  - 挂两个不同图片的缓冲区时，固件自己挑，大约四分之一的完成结果落错位置。
 
-  因此翻译器做到一张图一个访问单元之前，驱动只能拷贝。
+  现在会话改成给一张图按它的完成次数挂缓冲区：同一个客户端缓冲区排两次，
+  固件能挑的仍然只有这张图自己的内存。这条路有主机测试，还没有硬件门禁，
+  所以 VP9 继续走拷贝。
 - **AV1 会压后一张图。** VA 不提供 `refresh_frame_flags`，所以翻译器只能等
   下一个访问单元的参考表，才知道这张图刷新了哪些槽位。
   - 客户端领先一张图解码时（FFmpeg 带滤镜或下载、Chrome 都是），感觉不到
@@ -187,20 +212,25 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
 
   两种方式的切点都在 `-force_key_frames` 要的位置。下一个自动 IDR 在这一次
   之后一个 GOP 处，而不是原来的排期上。走 GOP 那条路时，每张请求 IDR 的图要
-  多写一次控制项。因此逐帧都请求反而比直接开 intra-only 贵。
+  多写一次控制项。因此逐帧都请求反而比直接开 intra-only 贵。客户端要一张
+  intra picture 但没打 IDR 标志（FFmpeg 就会这样）时，驱动按 IDR 请求处理，
+  因为固件手上只有发 IDR 的那一个杠杆。
 - **不支持 B 帧。** 内核最多允许 1 个，而延迟返回的 CAPTURE 会破坏一进一出
   的模型。序列参数里 `ip_period > 1` 的 context 直接返回
   `VA_STATUS_ERROR_INVALID_PARAMETER`。
 - **不支持 10-bit、VP9、AV1 编码。** 编码节点的 OUTPUT 队列只列 NV12 和
   QC08C。因此 HEVC Main10 和 VP9 Profile 2 喂不进去。
 - **不声明 packed headers，所以打开编码器时没有 extradata。** SPS/PPS 由固件
-  自己写，驱动不会再把客户端那一份塞进去。
+  自己写，驱动不会再把客户端那一份塞进去。`VAConfigAttribEncPackedHeaders`
+  回的是 `VA_ENC_PACKED_HEADER_NONE` 而不是 "不支持"：0 表示这个属性认得、
+  只是不收 packed header，`VA_ATTRIB_NOT_SUPPORTED` 才是客户端根本不能问。
   - FFmpeg 能处理。它报个警告，把参数集留在码流里，再从第一个包提取
     `avcC` / `hvcC`。所以直接输出 `.mp4` 是可用的：H.264 的 extradata 43
     字节，HEVC 124 字节。
-  - GStreamer 的 VA 编码器更严格，驱动不声明任何 packed header 就直接拒绝。
-    因此 `vah264enc` / `vah265enc` 用不了。FFmpeg 的 `h264_vaapi` /
-    `hevc_vaapi` 可以。
+  - GStreamer 的 VA 编码器在那一项回 `VA_ATTRIB_NOT_SUPPORTED` 时会拒绝，
+    因为它分不清这是驱动不认识还是自己问错了。回 0 能过它的检查，所以
+    `vah264enc` / `vah265enc` 能启动起来。它们接着编出来的流对不对，还没
+    在硬件上验证。
 - **编码是流水线的，`-async_depth` 生效。** `vaEndPicture` 把图排进队列就
   返回。码流由 `vaSyncBuffer` 在 coded buffer 上取；不调同步的客户端在
   `vaMapBuffer` 时取。FFmpeg 看到 `vaSyncBuffer` 就走异步路径。因此
@@ -213,6 +243,21 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   多于一个、tiles、wavefront 编码、加权预测、scaling list、chroma QP 偏移、
   多个参考帧索引，一律返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。序列头由固件写，
   参考结构和量化由固件定。交出一段没照做的流，比直接失败更糟。
+- **picture 的约定是查出来的，不是假设的。** 固件只有一个参考帧和一个改图类型
+  的杠杆，所以驱动拿客户端的要求去对编码器能做的事：
+  - 非 IDR 的 I picture，或者 HEVC CRA，都会被提升成 IDR 请求。Iris 只暴露
+    `FORCE_KEY_FRAME`，它发的是 IDR；另一条路是把这张图当 P 编，码流的顺序
+    就错了。FFmpeg 在 `-idr_interval` 大于 0 时会提交这种图：
+    `hw_base_encode.c` 给两个 IDR 之间的 GOP 边界发 `FF_HW_PICTURE_TYPE_I`，
+    `vaapi_encode_h264.c` 随之用 `slice_type = 7` 配 `idr_pic_flag = 0`。
+    默认间隔是 0，所以光给 `-g` 走不到这条路。
+  - inter picture 的参考列表里必须写上一张图的 reconstruction surface，别的
+    一律返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
+  - 码流必须从 intra picture 开始，标成 non-reference 的图直接拒。
+  - 只接受一张覆盖整幅的 slice：`macroblock_address` /
+    `slice_segment_address` 为 0，且 slice 覆盖整幅（HEVC 看
+    `num_ctu_in_slice`）。B slice，以及 HEVC `coding_type` 和 slice 类型对不上
+    的，都拒。
 - **slice 的去块滤波参数要么照做，要么报错。** VA 的 slice 参数是客户端唯一
   能提出关掉滤波或调偏移量的地方。内核有这些控制项时，驱动把
   `disable_deblocking_filter_idc`、alpha/beta 转给
