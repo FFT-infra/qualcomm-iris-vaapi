@@ -24,6 +24,27 @@ reported only after a drain or a sync timeout; no sync-frame control means a
 requested IDR moves the intra period and the driver puts the last SPS/PPS in
 front of it.
 
+`SHA256SUMS` records the hash of each patch. Both the module recipe below and
+the downstream package that fetches these files by URL verify against it, so a
+patch edited in place fails a check instead of reaching a build.
+`test/iris-kernel-patch-check.sh` compares the files to it, asserts every path
+a patch touches is under `drivers/media/platform/qcom/iris/`, and pins the
+one-line marker of each change — the counts it checks are the same greps the
+"check these by hand" list below gives an operator.
+
+These patches are consumed by
+[`GhfunNiHe/sheng-fedora-packages`](https://github.com/GhfunNiHe/sheng-fedora-packages)
+(the branch carrying them is in the `FFT-infra` fork), whose
+`kernel-sm8550/kernel-sm8550.spec` fetches each one by commit-pinned URL from
+this repository and checks the recorded hash before `%patch`. A change to a
+patch here therefore breaks that build until the pin and the hash move with
+it.
+
+The spec's URLs pin commit `8dd655e`, which is reachable through the draft
+pull request on `phxinyang/qualcomm-iris-vaapi`, not from `main`: `main` still
+carries only `0001-*`. Force-pushing that branch is what would break the URLs,
+because the commit would then be collected.
+
 Rebuild only the module, on the target, against the running kernel:
 
 ```sh

@@ -411,13 +411,15 @@ Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding 
   `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
   `_LOOP_FILTER_MODE`, `_LF_TC_OFFSET_DIV2`, `_LF_BETA_OFFSET_DIV2`) when
   the kernel has them. The offsets are dropped when filtering is off, since
-  the slice header does not carry them then. This module has none of the six
-  controls and the firmware always filters with 0/0 offsets, so a non-default
-  request is `VA_STATUS_ERROR_UNIMPLEMENTED`: substituting the default would
-  return a stream the client did not ask for. Mode 2 is the one accepted
-  exception, because it only turns filtering off across slice boundaries and
-  one slice per picture makes it the same stream as mode 0 — an HEVC client
-  that leaves `slice_loop_filter_across_slices_enabled_flag` clear is asking
+  the slice header does not carry them then. A kernel without the six
+  controls — the stock SM8550 module, which `packaging/kernel/0002-*` is the
+  patch for — always filters with the firmware's 0/0 defaults, so a
+  non-default request there is `VA_STATUS_ERROR_UNIMPLEMENTED`: substituting
+  the default would return a stream the client did not ask for. Mode 2 is
+  the one accepted exception, because it only turns filtering off across
+  slice boundaries and one slice per picture makes it the same stream as
+  mode 0 — an HEVC client that leaves
+  `slice_loop_filter_across_slices_enabled_flag` clear is asking
   for exactly that and still encodes here. Deblocking cannot change
   mid-context; a later picture that asks for something else is
   `UNIMPLEMENTED` too.

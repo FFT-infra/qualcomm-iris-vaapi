@@ -53,6 +53,7 @@ jobs:
             iris-eos-check-self-test \
             iris-deploy-path-check \
             iris-setup-path-check \
+            iris-kernel-patch-check \
             provenance-self-test; do
             grep -Eq "(^|:)${required}$" build/meson-tests.txt || {
               echo "missing Meson test: $required" >&2

@@ -50,7 +50,7 @@
         "rejected": [
           "B-frames",
           "packed headers (Annex-B output only)",
-          "deblocking other than the kernel default: no loop-filter controls on SM8550",
+          "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "multi-slice",
           "weighted prediction, scaling lists and chroma QP offsets",
           "more than one reference index",
@@ -100,7 +100,7 @@
           "HEVC Main10",
           "B-frames",
           "packed headers (Annex-B output only)",
-          "deblocking other than the kernel default: no loop-filter controls on SM8550",
+          "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "multi-slice",
           "tiles and wavefront coding",
           "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits"
