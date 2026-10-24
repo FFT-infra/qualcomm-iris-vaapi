@@ -27,7 +27,7 @@
 
 Name:           libva-v4l2-iris
 Version:        0.1.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
 
 # The backend carries both licences; see COPYING, COPYING.LGPL and COPYING.MIT.
@@ -123,6 +123,10 @@ sh scripts/refresh-install-manifest.sh \
 %{_datadir}/iris-vaapi/install-manifest.txt
 
 %changelog
+* Sun Oct 25 2026 Iris VA-API maintainers - 0.1.0-3
+- Ship the scripts the package already referenced but did not carry: a clean
+  checkout built no installer input at all.
+
 * Sun Oct 25 2026 Iris VA-API maintainers - 0.1.0-2
 - Drop the browser launcher and desktop entry: libva resolves the driver
   through the msm_drv_video.so alias, so a client needs neither.
