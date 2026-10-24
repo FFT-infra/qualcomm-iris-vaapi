@@ -3309,6 +3309,14 @@ Regression checks on the same build:
 - `sh test/run-static-checks.sh` PASS; `meson test -C build-def`
   19/19 OK, 0 Fail.
 
+Installed package, no environment overrides (`scripts/install-system.sh
+build-def`): `source_commit=ff3269f`, `source_dirty=0`,
+`artifact_sha256=ea7030b6…`, installed driver sha256 identical. Eight runs
+with `LIBVA_DRIVER_NAME`/`LIBVA_DRIVERS_PATH` unset through `env -u`: 8 of 8
+gave 80/80 frames, exit 0, `token=43` completing as `0x4009` after
+`capture configure 896x480`. The only `0x104001` in those logs is the
+terminal EOS drain at `index=10`.
+
 Still open and unrelated to this fix: forcing `V4L2_VA_PUBLISH=copy` makes
 the same file fail at the first post-change picture with
 `gpu copy: invalid buffer layout`. `GpuBlitter::copy` builds both views from
