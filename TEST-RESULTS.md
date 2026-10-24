@@ -4084,6 +4084,10 @@ of its own assumptions were wrong on the first run:
 The check also confirms `iommu_group_type=DMA` for `aa00000.video-codec`,
 which is the shared address space the GPU blit path depends on.
 
+Committed as `e15c2fe`. As with the Import section above, the deployed tree
+matched that commit under `src/` except for one comment, which the commit
+rewrote to carry these numbers.
+
 ### Power
 
 The tablet was at 6% and charging when the run started, 10% by the end, at
@@ -4233,6 +4237,11 @@ The Chrome row is the one that was missing: earlier VP9 browser numbers came
 from a scratch tree with VP9 patched into `import_formats`. This run uses the
 deployed tree and the shipped policy, and it is the H.264 Import control that
 the VP9 comparison above needs.
+
+Committed as `e6af9ef`. The tree the runs used carried this code and nothing
+else that differs: every file under `src/` was byte-identical to the commit
+apart from one comment in `driver.cc`, which is where the VP9 numbers above
+now live.
 
 ## VP9 corpus re-run, and what the 4K decode cost is (2026-10-25)
 
