@@ -689,6 +689,14 @@ them).
     the first picture with nothing to retry. `p010_decode_profile()` is the
     one place that answers this, and the capability table, the config
     attributes, the surface attributes and the capture format all read it.
+20. Both publish paths copy the rectangle the source and the destination can
+    both hold. A client surface may still carry the pre-change geometry when
+    the first picture of a new coded size arrives, because FFmpeg's download
+    path reuses its surface pool across a resolution change. `copy_pixels()`
+    intersects the client's image rectangle with the buffer's, and the GPU
+    engine builds each view from its own layout and copies `min(from, to)`;
+    a path that used the destination's size for both failed the whole
+    segment with `invalid buffer layout`.
 
 ## 11. How work is divided
 

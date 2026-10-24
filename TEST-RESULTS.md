@@ -3317,18 +3317,36 @@ gave 80/80 frames, exit 0, `token=43` completing as `0x4009` after
 `capture configure 896x480`. The only `0x104001` in those logs is the
 terminal EOS drain at `index=10`.
 
-Still open and unrelated to this fix: forcing `V4L2_VA_PUBLISH=copy` makes
-the same file fail at the first post-change picture with
-`gpu copy: invalid buffer layout`. `GpuBlitter::copy` builds both views from
-`to.width`/`to.height` (the destination surface's layout) while `from` is the
-new-resolution frame, so a client surface still at the old geometry trips
-`width <= layout.width` in `gpu_copy.cc:132`. The default path is Direct and
-does not reach it; the pre-fix build fails identically (3 of 3), so this is a
-separate pre-existing Copy-path defect, recorded here rather than fixed.
+The A/B sweep that confirmed the ordering fix also surfaced a second defect on
+the Copy publish path, which the default Direct path never reaches. Forcing
+`V4L2_VA_PUBLISH=copy` made the same file fail at the first post-change
+picture with `gpu copy: invalid buffer layout`. `GpuBlitter::copy` built both
+the source and destination views from `to.width`/`to.height`, the destination
+surface's layout, while `from` is the new-resolution frame; a client surface
+still at the old geometry then asks for a source rectangle the source buffer
+never had (`gpu_copy.cc:132`). FFmpeg's download path reuses its surface pool
+across a resolution change, so this is reachable, and it is reachable in
+production: the capability table marks only H.264 and HEVC Import-qualified,
+so a pre-exporting client decoding AV1 publishes through Copy.
+
+`copy_pixels()` already intersects the client's rectangle with the buffer's
+for the CPU path; `copy()` now does the same — each view is built from its own
+layout, and the copy covers `min(from, to)` in each dimension. Same harness,
+`V4L2_VA_PUBLISH=copy`, `resize-av1.mkv`:
+
+| Build | Runs | Frames | Against software |
+| --- | --- | --- | --- |
+| before (`ff3269f`) | 3 | 40 of 80, `invalid buffer layout` | n/a |
+| after (`378c113`) | 6 | 80 of 80 | byte-identical, every frame |
+
+A file without a resolution change is unaffected: `h720.mkv` gives 40 of 40
+frames on both builds, byte-identical to each other. That output differs from
+the software decode of the same file, which is a property of the GPU copy's
+colour conversion and not of this change; it is the same on both builds.
 
 Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` — `f-*.log` and `v-*.log`
 passing, `n-*.log`/`q-*.log` the before/after pair with the kernel trace,
-`pub-copy-*.log` the Copy-path defect.
+`cp-*.log` the Copy path after the fix, `pub-copy-*.log` before it.
 
 ## Codec conformance: Fluster on the installed package (2026-10-24)
 
