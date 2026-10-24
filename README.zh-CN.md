@@ -27,8 +27,8 @@ Firefox 用的是同一个驱动，也都欢迎，只是它们本来就有各自
 
 | 编码 | Chrome | Chrome 里走的路径 | 逐比特验证 |
 | --- | --- | --- | --- |
-| H.264（CB/Main/High） | 硬件解码 | Import，零拷贝 | 逐帧 MD5 与原生 V4L2 解码器一致；Fluster JVT-AVC_V1 40/135，与固件自身的通过集相同 |
-| HEVC Main | 硬件解码 | Import，零拷贝 | 逐帧 MD5 一致；Fluster JCT-VC-HEVC_V1 111/147（固件 112） |
+| H.264（CB/Main/High） | 硬件解码 | Import，零拷贝 | 逐帧 MD5 与原生 V4L2 解码器一致；Fluster JVT-AVC_V1 72/135；63 条未通过的已在 TEST-RESULTS.md 逐条分类，其中 49 条是内核直接拒绝的场编码码流 |
+| HEVC Main | 硬件解码 | Import，零拷贝 | 逐帧 MD5 一致；Fluster JCT-VC-HEVC_V1 141/147 |
 | HEVC Main10（P010） | 硬件解码 | Import，零拷贝 | 10-bit 逐帧 MD5 一致 |
 | VP9 Profile 0 / 2 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，8-bit 和 10-bit |
 | AV1 Profile 0 | 硬件解码 | GPU blit（见限制） | 逐帧 MD5 一致，alt-ref、无 alt-ref、8-bit 和 10-bit 都验证过 |

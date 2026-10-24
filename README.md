@@ -31,8 +31,8 @@ Chrome 152.
 
 | Codec | Chrome | Path in Chrome | Bit-exact check |
 | --- | --- | --- | --- |
-| H.264 (CB/Main/High) | hardware decoder | Import, zero-copy | frame MD5 equal to the native V4L2 decoder; Fluster JVT-AVC_V1 40/135, equal to the firmware's own pass set |
-| HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 111/147 (firmware 112) |
+| H.264 (CB/Main/High) | hardware decoder | Import, zero-copy | frame MD5 equal to the native V4L2 decoder; Fluster JVT-AVC_V1 72/135; the 63 non-passes are classified in TEST-RESULTS.md, and 49 of them are field-coded streams the kernel refuses |
+| HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 141/147 |
 | HEVC Main10 (P010) | hardware decoder | Import, zero-copy | frame MD5 equal at 10-bit |
 | VP9 Profile 0 / 2 | hardware decoder | GPU blit (see limits) | frame MD5 equal, 8- and 10-bit |
 | AV1 Profile 0 | hardware decoder | GPU blit (see limits) | frame MD5 equal, alt-ref, no-alt-ref, 8- and 10-bit |
