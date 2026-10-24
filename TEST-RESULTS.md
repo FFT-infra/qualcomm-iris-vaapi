@@ -1412,6 +1412,22 @@ Firefox needed `LIBVA_V4L2_VIDEO_PATH` and `MOZ_DISABLE_RDD_SANDBOX=1`:
 with the RDD sandbox on, the driver's `/dev/video*` scan is denied in that
 process. That is a pre-existing sandbox boundary, not an encode change.
 
+**Correction (2026-10-24).** The sandbox is not what Firefox needs, and
+disabling it was never necessary. The driver globs `/dev/video*` only for a
+node whose path variable is unset: with `LIBVA_V4L2_VIDEO_PATH` and
+`LIBVA_V4L2_ENCODER_PATH` both set, `strace -f -e trace=openat` over
+`vainfo` shows exactly two opens, `/dev/video2` and `/dev/video3`, and no
+scan of the others. Only the decoder path was set in that old run, so the
+encoder probe had to glob, which a sandboxed process may be denied. The
+launcher now resolves both nodes and exports both paths
+(`scripts/iris-vaapi-browser`), so a client keeps the sandbox and still
+reaches the driver. Verified on the target: the launcher exports
+`LIBVA_V4L2_VIDEO_PATH=/dev/video2 LIBVA_V4L2_ENCODER_PATH=/dev/video3`,
+and under those two variables `vainfo` reports the same 12 entries
+(6 profiles x VLD and EncSlice) with two `openat` calls. Headless Firefox
+plays the clip without a VA session in either configuration, so this is a
+mechanism result from `strace` and `vainfo`, not a Firefox decode run.
+
 ### What the traces showed
 
 - The SM8550 encoder firmware sends no frame info, so
@@ -3544,3 +3560,83 @@ same two depths, so the build tree is not the reason for any difference.
 Not a Meson test: it needs the encoder node and a hardware GPU renderer, and
 its verdict is a pair of access units. `meson test` (19/19 on the target and
 on the builder) and `run-static-checks.sh` are unchanged.
+
+## Encode fidelity against the source (2026-10-24)
+
+The encode gates proved that a stream decodes and that a decode through this
+driver matches a decode through the native decoder. Neither says the pixels
+are the source's: an encoder that emitted flat grey would pass both.
+`test/iris-encode-quality.sh` measures structural similarity against the
+source instead, per codec, and refuses to trust the encoder.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, build tree `build-alloc` (this
+commit's working tree), encoder node `/dev/video3` resolved by
+`iris_driver` name and Card type, render node `/dev/dri/renderD128`,
+`testsrc2` 1920x1080 120 frames.
+
+| Check | H.264 | HEVC |
+| --- | --- | --- |
+| Iris IRQ delta | +240 | +240 (`iris` line in `/proc/interrupts`) |
+| frames decoded | 120 / 120 | 120 / 120 |
+| platform decode vs software decode | byte for byte | byte for byte |
+| SSIM against the source, mean | 0.998596 | 0.996808 |
+| SSIM against the source, worst frame | 0.9985 | 0.9963 |
+| blank-stream control | 0.000034 | 0.000034 |
+
+The blank-stream control is what makes the floor meaningful: a black frame
+sequence scores three orders of magnitude below the 0.90 floor, so a pass
+cannot come from the check happening not to look. The worst-frame number is
+used, not the mean, because one shattered frame is one broken picture handed
+back to the client.
+
+The IRQ counter is matched on the line's name (`iris`, `qcom-iris`, `venus`
+or `vcodec`) rather than a column position: the name differs between kernel
+branches, and a gate reading the wrong line would report zero and fail a run
+that worked.
+
+A first version of the script named the HEVC output `.h264`. FFmpeg picks the
+muxer from the extension, the H.264 raw muxer rejects HEVC at header write,
+and the process then died with SIGSEGV rather than an error — the gate
+reported `the encode failed`, which is true but names the wrong layer. Each
+stream now carries its own codec's extension, and the failure is FFmpeg's own
+message.
+
+Not a Meson test: it needs the encoder node, a render node and FFmpeg. It is
+in the hardware suite, not in `meson test` (19/19, unchanged).
+
+## Descriptor accounting across the surface lifecycle (2026-10-24)
+
+The driver duplicates a client's DMA-BUF on import, allocates a stable buffer
+for a surface it must export, and holds both V4L2 nodes. One descriptor left
+behind per surface is invisible in a short run and fatal in a long one:
+Chrome keeps a pool of surfaces for hours, and at the process limit every new
+surface fails.
+
+`test/iris-fd-leak-probe` counts `/proc/self/fd` rather than keeping a ledger
+the driver would agree with. Each cycle initializes once, then imports a
+client DMA-BUF, derives an image, exports a handle, and tears the surface
+down. Run on the same target and boot:
+
+```
+open fds per cycle: 10 10 10 10 10 10 10 10
+steady state 10..10 over 7 cycles
+after vaTerminate: 6 fds
+  fd 2 -> pipe:…
+  fd 3 -> /dev/dri/renderD128
+descriptors that are not the render node or a standard stream: 0
+```
+
+The count is flat across eight cycles, and after `vaTerminate` the only
+descriptors left are the render node the probe opened itself and the standard
+streams — so the driver released everything it opened, including the import
+duplicates and the export handles.
+
+The negative control is required for this to mean anything: with
+`IRIS_TEST_FD_LEAK=1` the probe leaks one DMA-BUF per cycle on purpose and
+must fail. It does — the count climbs 10, 11, 12 … 18 and the run reports
+`FAIL fd-leak cycles=8 steady=18`, with the leaked descriptors printed as
+`/dmabuf:`. A probe whose accounting was broken would report a flat line in
+both configurations.
+
+Not a Meson test: it needs libva's DRM display and the built driver.
