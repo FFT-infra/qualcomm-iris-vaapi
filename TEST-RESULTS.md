@@ -4524,18 +4524,33 @@ Host gates on this tree: `sh test/run-static-checks.sh` PASS,
 `meson test -C build-local --print-errorlogs` 19/19 OK, `git diff --check`
 clean.
 
-### The real installation, 0.1.0-2
+### The real installation, 0.1.0-2 and 0.1.0-3
 
-A live install, not a staging run. The tree packaged is HEAD's `src/` overlaid
-with this change set; `src/` was verified byte-identical to HEAD before the
-tarball was built, so the uncommitted encode work in the working tree is not
-in this package.
+A live install, not a staging run. Two packages were built the same evening
+and only the second is fit to keep; the first is recorded because it reached
+the target and because what was wrong with it is the kind of defect a hash
+cannot show.
+
+**0.1.0-2 was assembled by overlaying an untracked working tree.** Its tarball
+was HEAD's `src/` plus this change set copied over it. That produced a working
+driver, and `src/` was verified byte-identical to HEAD first, so the
+uncommitted encode work was correctly excluded. But the diagnostics
+(`iris-device-check.sh`, `iris-verify.sh`, `iris-configure-clients.sh`) and
+the node rule were **not tracked by git at all**, while the installer, the
+Fedora spec and the PKGBUILD all referenced them. Two consequences: a clean
+`git archive` of HEAD carried no installer input and would have failed to
+build, and the package recorded `source_dirty=0` against a commit that did not
+contain those files. The provenance field was wrong.
+
+0.1.0-3 fixes the cause rather than the symptom: the scripts are tracked, and
+the package is built from a clean `git archive` of the commit it names, with
+no overlay.
 
 | Fact | Value |
 | --- | --- |
-| RPM | `libva-v4l2-iris-0.1.0-2.fc44.aarch64.rpm`, Release 2 |
-| Source commit recorded | `3cfaa7e3b7f63c1953279b821b62545484646cff`, `source_dirty=0` |
-| Installed driver | `/usr/lib64/dri/v4l2_drv_video.so`, SHA-256 `0cdde52fa9110e…`, 399920 bytes |
+| RPM | `libva-v4l2-iris-0.1.0-3.fc44.aarch64.rpm`, Release 3 |
+| Source commit recorded | `7ea57da71283085256dbb5c7b535c76635e4e4f8`, `source_dirty=0`, a clean archive that contains every shipped file |
+| Installed driver | `/usr/lib64/dri/v4l2_drv_video.so`, SHA-256 `93c98565fc3373…`, 399920 bytes |
 | Kernel | `7.2.6-sm8550-g42f3b40-iris1` |
 | Boot ID | `23a37146-fa9a-4038-af0c-b6d33aa625d9` |
 | `rpm -V libva-v4l2-iris` | clean after the upgrade |
@@ -4576,8 +4591,8 @@ Browser acceptance against the installed package, 20 s window:
 
 ```
 PASS browser=Chrome/152.0.7977.82 decoder=VaapiVideoDecoder platform=True
-     frames=599 dropped=0 holders=--type=gpu-process
-     driver=installed:0cdde52fa911 boot_unchanged=True
+     frames=599 dropped=2 holders=--type=gpu-process
+     driver=installed:93c98565fc33 boot_unchanged=True
 ```
 
 with `driver_mapped_in_gpu_process=/usr/lib64/dri/v4l2_drv_video.so`, sampled
