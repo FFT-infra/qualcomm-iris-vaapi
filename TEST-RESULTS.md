@@ -3317,6 +3317,13 @@ gave 80/80 frames, exit 0, `token=43` completing as `0x4009` after
 `capture configure 896x480`. The only `0x104001` in those logs is the
 terminal EOS drain at `index=10`.
 
+Both fixes together, installed as a package: `source_commit=3cfaa7e`,
+`source_dirty=0`, `artifact_sha256=cb9053e0…`, installed driver sha256 equal
+to the build tree. Direct path (no overrides) 8 of 8 runs give 80/80 frames,
+each byte-identical to the software reference; Copy path
+(`V4L2_VA_PUBLISH=copy`) 6 of 6, likewise byte-identical. `meson test -C
+build-def` 19/19 OK.
+
 The A/B sweep that confirmed the ordering fix also surfaced a second defect on
 the Copy publish path, which the default Direct path never reaches. Forcing
 `V4L2_VA_PUBLISH=copy` made the same file fail at the first post-change
