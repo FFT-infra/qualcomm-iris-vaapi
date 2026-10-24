@@ -3522,6 +3522,25 @@ the equal-bitstream comparison from an imported surface; a 60-frame run with
 `V4L2_VA_TRACE=1` emitted no `encode input fence` record, i.e. a swscale
 upload leaves no pending fence and the wait costs nothing on that path.
 
+Throughput, because a wait on the submit path could plausibly cost some. The
+recorded pipelining setting (§ "Pipelined encode", `testsrc2` 1920x1080,
+600 frames, CBR 12 Mbit/s, `-g 60`) measured 202 fps at `-async_depth 1` and
+370 fps at 4 on this build, against the 190 and 374 recorded for `9bd3dbd`.
+An interleaved A/B on one binary (`IRIS_TEST_NO_FENCE_WAIT` removing only the
+wait, wait and no-wait alternating, three rounds each) came out inside the
+run-to-run spread:
+
+| Round | wait d=1 | no wait d=1 | wait d=4 | no wait d=4 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 3.713 s | 3.923 s | 1.901 s | 1.930 s |
+| 2 | 4.174 s | 3.950 s | 1.880 s | 1.894 s |
+| 3 | 3.976 s | 3.810 s | 1.892 s | 1.898 s |
+
+The wait is a `poll()` that returns immediately when no fence is pending, and
+a swscale upload leaves none, so this is what it should cost. The installed
+package (`libva-v4l2-iris-0.1.0-1.fc44`) measured 4.131 s and 1.898 s on the
+same two depths, so the build tree is not the reason for any difference.
+
 Not a Meson test: it needs the encoder node and a hardware GPU renderer, and
 its verdict is a pair of access units. `meson test` (19/19 on the target and
 on the builder) and `run-static-checks.sh` are unchanged.
