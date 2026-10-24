@@ -3640,3 +3640,24 @@ must fail. It does — the count climbs 10, 11, 12 … 18 and the run reports
 both configurations.
 
 Not a Meson test: it needs libva's DRM display and the built driver.
+
+## CI: the inventory check failed on the meson version (2026-10-24)
+
+PR #1's CI had never run: every push waited for maintainer approval because
+the pull request is cross-repository (head in `FFT-infra`, base in
+`phxinyang`). The first approved run failed in 1 minute 13 seconds, before a
+single test ran: `missing Meson test: session`.
+
+The runner installs the distro's meson 1.3.2, which prints a bare test name.
+A developer's meson 1.11 prints `<project>:<name>`. The check grepped for
+`":${required}$"`, which only matches the second form, so every job failed on
+the first required name regardless of the code.
+
+Reproduced on the builder with meson 1.3.2 in a venv (`--list` prints
+`session`, `annexb`, …) and re-run the check loop against that output: the
+old pattern finds nothing, the new pattern `"(^|:)${required}$"` finds all 14
+required tests and still rejects `session-nonexistent`. The workflow now also
+prints `meson --version`, so a future log names the version that ran.
+
+Nothing has run end to end in CI yet: a green run needs the owner to approve
+the workflow for the new push, because the PR is cross-repository.
