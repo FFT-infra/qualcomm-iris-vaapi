@@ -3685,3 +3685,168 @@ controls is the one that changed; the decode path is unchanged.
 The suite's new encode gate also ran from `test/iris-hardware-suite.sh`:
 `iris-matrix`, `iris-structure-matrix` and `iris-encode-quality` all pass.
 Before this the encode gate was reachable only by hand.
+
+## The installed package, encode included, with no environment overrides (2026-10-24)
+
+Every encode result in this file before this section came from a build tree
+with `LIBVA_DRIVERS_PATH` set. The installed RPM was 80 commits behind
+(`source_commit=1d15de26…`, 2026-09-22) and carried no encode support, so no
+run had answered the question a user actually asks: after `dnf install`, with
+nothing in the environment, does encode work?
+
+### The artifact
+
+| Fact | Value |
+| --- | --- |
+| Source commit | `0b8ed1551b74317d154b50e306efb3efbd77ec06` (branch `feat/encode-entrypoints`, `source_dirty=false`) |
+| tracked-source SHA-256 | `6907a88135811e395d32ceede638a6447ed624d8611054e9e126c7849d03f007` |
+| RPM | `libva-v4l2-iris-0.1.0-1.fc44.aarch64.rpm`, SHA-256 `e8b551d9af063e6d69f2b447e9f1bb156c301fd1120227d1ede89d579324299c` |
+| Installed driver | `/usr/lib64/dri/v4l2_drv_video.so`, SHA-256 `b2f8151d3980339ccfb477801395e951d17af04845e0e6abeea86c83b4632efe`, 399920 bytes |
+| Kernel | `7.2.6-sm8550-g42f3b40-iris1`, `qcom-iris.ko.zst` `9b16a40179a08e…` |
+| Boot ID | `ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, unchanged through every run below |
+| Nodes | decoder `/dev/video2`, encoder `/dev/video3`, both resolved by `iris_driver` QUERYCAP name plus Card type; render `/dev/dri/renderD128` |
+| Chrome | 152.0.7977.82, through the packaged launcher and desktop entry |
+
+`rpm -V libva-v4l2-iris` is clean. The driver the RPM installed is not the
+driver that was there before: `artifact_sha256` in
+`/usr/share/iris-vaapi/install-manifest.txt` equals the file on disk, that
+file is 399920 bytes, and the previous installed driver was 8961024. The old
+file was a local `scripts/install-system.sh` build with symbols and the new one
+is the RPM's stripped payload; they shared only the name. The previous driver
+is backed up at `~/Lab/Bridge/tmp/rollback-driver-20261024T090903Z/` with its
+SHA-256 recorded, and `install-system.sh`'s own copy is at
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`, same hash.
+
+One thing the RPM does not clean up: the ownership rule in
+`scripts/uninstall-system.sh` refuses to remove a file that belongs to an RPM,
+so the 2026-10-24 09:22 `install-system.sh` install left
+`/usr/local/bin/iris-vaapi-browser` and
+`/usr/local/share/applications/google-chrome-iris-v4l2.desktop` in place
+beside the RPM's copies. `/usr/local/bin` precedes `/usr/bin` on this user's
+`PATH`, and `/usr/local/share` precedes `/usr/share` in `XDG_DATA_DIRS`, so a
+desktop launch from the icon used the **old** launcher. Pointing both at a
+script that prints the environment shows the difference:
+
+```
+/usr/bin/iris-vaapi-browser        LIBVA_V4L2_ENCODER_PATH=/dev/video3
+/usr/local/bin/iris-vaapi-browser  LIBVA_V4L2_ENCODER_PATH=<unset>
+```
+
+The encode path is unaffected — FFmpeg never goes through the launcher — and
+the acceptance run below invokes the packaged launcher explicitly. A browser
+started from the icon, though, would have the encoder node unnamed, which is
+the one thing the launcher change was for. The residue is left in place
+rather than deleted: it is the user's file, and removing it is a separate
+authorized action.
+
+### Runtime, no overrides
+
+`LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH`, `LIBVA_V4L2_VIDEO_PATH`,
+`LIBVA_V4L2_ENCODER_PATH` and `V4L2_VA_*` were checked absent from the
+environment first (`env | grep -E '^(LIBVA|V4L2_VA|GST_VA)'` matched
+nothing). libva then resolved the driver through the packaged
+`msm_drv_video.so` alias on its own:
+
+```
+libva info: Trying to open /usr/lib64/dri/msm_drv_video.so
+libva info: Found init function __vaDriverInit_1_23
+libva info: va_openDriver() returns 0
+```
+
+`vainfo` reports `VLD` for every decode profile and `VAEntrypointEncSlice`
+for `H264ConstrainedBaseline`, `H264Main`, `H264High` and `HEVCMain`. That is
+the first time encode entrypoints came from an installed package on this
+device.
+
+| Check | H.264 | HEVC |
+| --- | --- | --- |
+| `ffmpeg -vaapi_device` 300 frames 1080p, `-b:v 4M -g 60` | exit 0, 9915972 bytes | exit 0, 9968504 bytes |
+| Iris IRQ delta, both in one window | +1150 for the pair | |
+| decodes with no error | yes | yes |
+| frames / profile / level / geometry | 300, High, 4.0, 1920x1080 | 300, Main, 4.0, 1920x1080 |
+| fidelity gate SSIM against the source | mean 0.998596, worst 0.9985 | mean 0.996808, worst 0.9963 |
+| blank-stream control | 0.000034 | 0.000034 |
+
+The two FFmpeg warnings are the documented ones and not failures:
+`Driver does not support any packed headers (wanted 0xd)`, and for HEVC
+`Driver does not advertise encoder features, using guessed defaults`. The
+fidelity gate ran with `LIBVA_DRIVERS_PATH=/usr/lib64/dri` and produced the
+same numbers as the build-tree run recorded above — as it must, since it is
+the same source — which also confirms the gate now measures the driver it is
+told to measure.
+
+### The rest of the gates, from the installed package
+
+All run with `LIBVA_DRIVERS_PATH=/usr/lib64/dri`:
+
+| Gate | Result |
+| --- | --- |
+| `iris-matrix` | H.264, VP9, HEVC, AV1 all `content=frame-md5`; 48 frames each, 1 drain, 0 timeouts, 0 drops; AV1 `noshow=23` as recorded |
+| `iris-structure-matrix` | all-I, IP-g12, B=2, B=4 pass |
+| `iris-zero-copy-suite` | `direct=24` |
+| `iris-encode-quality` | H.264 and HEVC pass, numbers above |
+| `iris-browser-acceptance`, packaged launcher, no `--driver` | `decoder=VaapiVideoDecoder platform=True frames=902 dropped=0 holders=--type=gpu-process driver=installed:b2f8151d3980` |
+| `iris-hardware-suite` | `iris-matrix`, `iris-structure-matrix`, `iris-encode-quality`, and native GStreamer h264/vp9/hevc/av1 all PASS |
+
+The matrix trace reports `publish=direct` for all 48 H.264 and all 48 HEVC
+completions. FFmpeg exports surfaces only after their decode, so Direct is
+the expected policy; the Import path is exercised by Chrome, which the
+acceptance run above does with the GPU process holding the node.
+
+`iris-browser-acceptance.sh` launches `../scripts/iris-vaapi-browser` from the
+checkout it runs in, so testing the packaged launcher needs that path to be
+the packaged file. Run from a tree whose `scripts/iris-vaapi-browser` is a
+symlink to `/usr/bin/iris-vaapi-browser`, with no `--driver` and no
+environment set, Chrome reports `VaapiVideoDecoder`, platform true, 902
+frames in 30 s, zero drops, `driver=installed:b2f8151d3980`, and the GPU
+process holds `/dev/video2`. That is the packaging path end to end: the RPM's
+launcher found both nodes, and the RPM's driver decoded through libva's
+`msm_drv_video.so` alias.
+
+### The one failure, and why it is not this driver
+
+`test/iris-hardware-suite.sh` reported `FAIL v4l2-compliance rc=1`:
+`Total for iris_driver device /dev/video2: 48, Succeeded: 41, Failed: 7`. The
+seven are the kernel's, not the driver's — `v4l2-compliance` talks to the
+node through ioctls and links neither libva nor this `.so` (`ldd` shows no
+`libva` or `libdrm`). The classes:
+
+- `missing bus_info prefix ('plat:aa00000.video-codec:dec')`, twice, on
+  `VIDIOC_QUERYCAP`. Both Iris nodes report `plat:aa00000.video-codec:dec`
+  and `plat:aa00000.video-codec:enc`. The v4l2 core fills `bus_info` with
+  `platform:` when the driver leaves it empty, so the driver writes this
+  string itself; Venus writes the same `plat:%s:dec` form
+  (`drivers/media/platform/qcom/venus/vdec.c`). v4l2-compliance's allow-list
+  contains `platform:` and not `plat:`.
+- `!colorspace` on `VIDIOC_G_FMT`, `TRY_FMT` and `S_FMT` — the Iris formats
+  report no `colorspace`, `ycbcr_enc` or `quantization` for the compressed
+  OUTPUT formats.
+- `min_number_of_capture_buffers` present in `--list-ctrls` but absent from
+  the control class `v4l2-compliance` classifies it under.
+- `q2.reqbufs(node2, 1) != EBUSY` on `REQBUFS`.
+
+This file records 47/48 for `v4l2-compliance` in August 2026, with only the
+control-class failure. That run used kernel `7.2.0-sm8550`; this one uses
+`7.2.6-sm8550-g42f3b40-iris1`, which is the kernel with the project's four
+patches applied. The extra failures are the QUERYCAP `bus_info`, the
+colorspace trio and the `REQBUFS` one. None of the four patches touches
+`bus_info`, colorspace or `REQBUFS` (`grep bus_info packaging/kernel/*.patch`
+matches nothing), so the difference belongs to the 7.2.6 base or to the
+patches applying over it; the August rows are kept as recorded rather than
+overwritten. The point of this section is that the current target fails them
+and the userspace gates all pass while it does.
+
+`v4l2-compliance` is not a gate on the driver in any case: the suite fails
+the run because a strict external check failed, and a maintainer reading the
+summary should treat that line as a kernel-interface report, not as a
+regression in `src/`.
+
+### One defect the run found in the test tree
+
+`test/iris-encode-quality.sh` set `LIBVA_DRIVERS_PATH=$root/build-local/src`
+in the encode command, ignoring the caller. On this target that directory
+does not exist, so the gate could only ever have measured an installed
+driver, and `iris-hardware-suite.sh` passing `LIBVA_DRIVERS_PATH` to it
+silently did nothing. It now reads `LIBVA_DRIVERS_PATH` (default
+`build/src`) and fails with a clear message when that directory holds no
+`v4l2_drv_video.so`; the negative control above confirms the failure path.

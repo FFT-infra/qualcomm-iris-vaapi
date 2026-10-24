@@ -21,6 +21,9 @@
 # Usage: iris-encode-quality.sh [encoder-node] [render-node]
 #
 # Environment:
+#   LIBVA_DRIVERS_PATH        directory holding the driver to measure
+#                             (default <checkout>/build/src; name
+#                             /usr/lib64/dri to measure an installed package)
 #   IRIS_ENCODE_QUALITY_DIR   scratch directory (default $IRIS_LAB_ROOT or
 #                             ~/Lab/Bridge/tmp)
 #   IRIS_ENCODE_FRAMES        frames per codec (default 120)
@@ -81,6 +84,12 @@ command -v ffprobe >/dev/null 2>&1 || fail 'ffprobe is required'
 
 encoder=$(resolve_encoder)
 render=${2:-/dev/dri/renderD128}
+# The caller may name the driver: the hardware suite passes its own tree, and
+# an installed package is verified by naming /usr/lib64/dri. A hardcoded build
+# directory silently measures whatever happens to be installed instead.
+driver_path=${LIBVA_DRIVERS_PATH:-$root/build/src}
+[ -f "$driver_path/v4l2_drv_video.so" ] \
+    || fail "no v4l2_drv_video.so in $driver_path; set LIBVA_DRIVERS_PATH"
 [ -c "$render" ] || fail "not a DRM render node: $render"
 [ -c "$encoder" ] || fail "not a V4L2 node: $encoder"
 
@@ -112,7 +121,7 @@ check_codec() {
     ref=$work/$codec.ref.nv12
 
     irq_before=$(irq_count)
-    LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$root/build-local/src \
+    LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$driver_path \
         ffmpeg -hide_banner -loglevel error \
         -vaapi_device "$render" -f rawvideo -pix_fmt yuv420p -s "$size" -r 30 \
         -i "$source_nv12" -vf format=nv12,hwupload \

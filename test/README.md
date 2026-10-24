@@ -54,7 +54,8 @@ Two probes build with the tree and run on the target only:
   against the source. Asserts the encode moved the Iris IRQ counter, the
   stream decodes, every decoded frame matches a software decode, and both the
   mean and the worst-frame SSIM against the source clear a floor that a blank
-  stream cannot.
+  stream cannot. It measures `$LIBVA_DRIVERS_PATH` (default `build/src`), so
+  naming `/usr/lib64/dri` verifies an installed package.
 
 ## Qualcomm Iris codec matrix
 
