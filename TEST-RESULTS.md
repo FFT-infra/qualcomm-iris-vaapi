@@ -3661,3 +3661,27 @@ prints `meson --version`, so a future log names the version that ran.
 
 Nothing has run end to end in CI yet: a green run needs the owner to approve
 the workflow for the new push, because the PR is cross-repository.
+
+## The launcher exports both nodes, and Chrome still decodes (2026-10-24)
+
+`scripts/iris-vaapi-browser` now resolves the encoder node and exports
+`LIBVA_V4L2_ENCODER_PATH` beside `LIBVA_V4L2_VIDEO_PATH`. That changes the
+environment of every browser it starts, so it needs a browser run, not a
+`sh -n`.
+
+`test/iris-browser-acceptance.sh` with the build-tree driver on the same
+target and boot:
+
+```
+PASS browser=Chrome/152.0.7977.82 decoder=VaapiVideoDecoder platform=True
+     frames=600 dropped=0 holders=--type=gpu-process
+     driver=build-tree:de253601b3ed boot_unchanged=True
+```
+
+Same decoder, platform flag set, 600 frames over a 20 s window with no
+drops, and the GPU process holding the node. The launch path the launcher
+controls is the one that changed; the decode path is unchanged.
+
+The suite's new encode gate also ran from `test/iris-hardware-suite.sh`:
+`iris-matrix`, `iris-structure-matrix` and `iris-encode-quality` all pass.
+Before this the encode gate was reachable only by hand.
