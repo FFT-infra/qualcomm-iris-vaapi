@@ -67,6 +67,31 @@ shared_module(
   c_args: ['-Wall', '-Wextra'],
   name_prefix: '')
 
+# Hardware probe, built but not registered as a meson test: whether a GPU job
+# leaves a pending fence on its destination buffer right after glFlush(). That
+# is the window the encode input's fence wait covers; if it is not observable
+# on this GPU, no probe can claim the wait mattered.
+if have_gpu_copy
+  executable(
+    'gpu-fence-check',
+    'gpu-fence-check.cc',
+    dependencies: [iris_core_dep, egl_dep, glesv2_dep, gbm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: whether the
+# encoder waits for an input surface's pending GPU write before handing it to
+# the firmware. Needs the encoder node, an MSM render node and a real GPU
+# driver, and compares access units, so only a target run can judge it.
+# docs/architecture.md §10 invariant 11.
+if have_gpu_copy
+  executable(
+    'iris-encode-fence-probe',
+    'iris-encode-fence-probe.cc',
+    dependencies: [iris_core_dep, egl_dep, glesv2_dep, gbm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Client memory (DRM_PRIME_2 / PRIME_1) accepted only in the CAPTURE layout,
 # and the one definition of that layout. No hardware.
 prime_import_test = executable(

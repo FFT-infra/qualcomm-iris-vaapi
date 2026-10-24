@@ -3468,3 +3468,58 @@ the fast path happening to work.
 This is not a Meson test: every rung but the last needs an MSM render node,
 and a host without one cannot run any of it. `meson test` (19/19) and
 `run-static-checks.sh` are unchanged by the addition.
+
+## Encode input fence (2026-10-24)
+
+`src/iris/encode.cc` queued a surface's DMA-BUF to OUTPUT with no fence
+wait. The kernel attaches nothing of its own to a dmabuf QBUF, so a client
+that renders into the surface and only flushes was encoded from whatever the
+buffer held before its GPU write landed. Every other path already waits —
+`session.cc` before an Import capture buffer is handed to the firmware,
+`publish.cc` and `gpu_copy.cc` before a copy — and the encoder was the one
+that did not. `submit()` now waits on `POLLOUT` (read *and* write fences,
+`dma_resv_usage_rw(true)`) before the session lock, bounded at 2 s, and
+traces `encode input fence` when the wait reached 20 ms.
+
+`test/iris-encode-fence-probe` measures the result rather than the call.
+Three NV12 stable buffers share a chroma plane and differ in luma: `current`
+(the picture to encode), `stale` (the one it replaces), and `staged`, which
+starts as a CPU copy of `stale`. On a live session the GPU rewrites `stale`
+over `staged` 512 times — same content, so the destination's bytes say
+nothing about progress but the queue stays busy — and then blits `current`
+into it. `staged`'s memory therefore reads `stale` before the blits land and
+`current` after them, which is exactly the question the wait decides.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `7173756` plus the
+working-tree change, build tree `build-alloc` (probe `1413ac6f9ad4…`),
+encoder node `/dev/video3` ("Iris Encoder") and render node
+`/dev/dri/renderD128`, both resolved by name.
+
+| Run | Fence at submit | Fence after submit | Staged access unit | Verdict |
+| --- | --- | --- | --- | --- |
+| with the wait, 3 runs | pending | signaled | 169245 bytes, equal to `current` | PASS |
+| wait removed, 3 runs | pending | pending | 160574 bytes, equal to `stale` | FAIL |
+
+The negative control is the whole point of the probe: with the wait removed
+the firmware encoded the picture as the buffer held it *before* the blit, and
+the byte counts name which one it read. The first version of this probe
+blitted `current` over `staged` directly and passed both ways — a single
+blit drained before the submit was queued, so the comparison could not fail.
+A probe that cannot fail is not evidence.
+
+The two reference pictures are encoded from their own configured sessions,
+so no picture predicts from another and equal pixels must give equal bytes.
+The blit runs inside the same function that then submits, after
+`configure()` has returned, so the V4L2 setup cannot absorb the window.
+
+Also on this boot: `ffmpeg` `h264_vaapi` and `hevc_vaapi` at 1920x1080,
+120 frames each, both decode clean (`-f null -`) and read back 120 frames at
+1920x1080; `iris-va-import-probe` passes all twelve of its checks including
+the equal-bitstream comparison from an imported surface; a 60-frame run with
+`V4L2_VA_TRACE=1` emitted no `encode input fence` record, i.e. a swscale
+upload leaves no pending fence and the wait costs nothing on that path.
+
+Not a Meson test: it needs the encoder node and a hardware GPU renderer, and
+its verdict is a pair of access units. `meson test` (19/19 on the target and
+on the builder) and `run-static-checks.sh` are unchanged.

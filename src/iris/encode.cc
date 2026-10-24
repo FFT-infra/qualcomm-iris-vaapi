@@ -26,6 +26,12 @@ namespace {
 constexpr unsigned kOutputSlots = 4;
 constexpr unsigned kCaptureSlots = 4;
 constexpr int kPollMs = 20;
+// How long an input may still be under a GPU write before the firmware would
+// read it. The same bound the decode path gives a client buffer it is about
+// to write into (src/iris/session.cc, kImportFenceMs).
+constexpr int kInputFenceMs = 2000;
+// Below this the wait is not worth a trace record: every picture has one.
+constexpr int kFenceTraceMs = 20;
 // A client's vaSyncBuffer timeout is a bound, not a schedule. Cap it so a
 // millisecond value mistaken for a nanosecond one cannot hold a thread for
 // years.
@@ -372,6 +378,25 @@ void EncoderSession::take_output_slot(Clock::time_point limit)
 
 EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params)
 {
+    // A client often renders straight into the surface and only flushes: the
+    // write is then pending in the DMA-BUF's reservation object, and the
+    // kernel attaches no fence of its own, so vb2 would queue the fd exactly
+    // as it finds it and the firmware would encode whatever was in memory
+    // before. POLLOUT waits on the read *and* write fences
+    // (dma_resv_usage_rw(true)), which is the set a new writer has to clear;
+    // it is the same call the decode path makes before the firmware writes
+    // into a client's buffer.
+    //
+    // Waited for before the session lock: the fence belongs to the client's
+    // buffer, not to the session, so a client still drawing must neither pin
+    // an input slot nor hold up a thread claiming an access unit.
+    const auto fence_start = Clock::now();
+    wait_dma_buf(dmabuf_fd, true, kInputFenceMs);
+    const auto fence_ms
+        = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - fence_start).count();
+    if (fence_ms >= kFenceTraceMs)
+        trace_("encode input fence fd=%d waited=%lldms", dmabuf_fd, static_cast<long long>(fence_ms));
+
     std::lock_guard<std::mutex> lock(mutex_);
     require(configured_ && !finished_, "encoder is not streaming", VA_STATUS_ERROR_OPERATION_FAILED);
     require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);

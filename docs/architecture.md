@@ -561,6 +561,9 @@ va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1
+encode input fence fd=<n> waited=<ms>                 (only when the input's
+                                                       write fence was pending
+                                                       20 ms or longer)
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
@@ -644,7 +647,12 @@ below the first needs an MSM render node.
     dropped: the drain resolves whatever is still outstanding.
 11. An encode surface is input only. It never carries a decode target, and
     the session queues exactly one raw buffer per picture, so a picture
-    cannot be encoded into a buffer that still holds the next one.
+    cannot be encoded into a buffer that still holds the next one. The
+    buffer's pending write fence is waited for before it is queued: the
+    kernel attaches no implicit fence to a dmabuf QBUF, so a client that
+    rendered into the surface and only flushed would otherwise be encoded
+    from stale pixels. The wait is bounded at 2 s and emits `encode input
+    fence` only when it exceeded 20 ms.
 12. An encode profile is advertised only when the encoder node's CAPTURE
     queue enumerates the codec and its OUTPUT queue enumerates NV12. Both
     lists come from `data/iris-codec-capabilities.json` and the

@@ -69,10 +69,12 @@ public:
     void configure(const EncodeParams& params, unsigned width, unsigned height, PrepareAccessUnit prepare = {});
     // Queue `dmabuf_fd` as one raw frame and return its ticket without
     // waiting. The caller keeps the DMA-BUF alive until the matching wait():
-    // the firmware reads it until it completes the picture. The V4L2
-    // timestamp advances by one frame duration of the session rate on every
-    // picture: the firmware echoes it, and it stops producing access units
-    // if the sequence ever goes backwards. A submitted picture is never
+    // the firmware reads it until it completes the picture. The buffer's
+    // pending write fence is waited for first, bounded at 2 s, so a client
+    // that rendered into it and only flushed is encoded as it drew it. The
+    // V4L2 timestamp advances by one frame duration of the session rate on
+    // every picture: the firmware echoes it, and it stops producing access
+    // units if the sequence ever goes backwards. A submitted picture is never
     // dropped; submit() blocks only when every input slot is still in use.
     EncodeTicket submit(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params);
     // Take the access unit for `ticket`. Completions arrive in submission

@@ -36,6 +36,16 @@ Two probes build with the tree and run on the target only:
 - `test/iris-encode-control-probe.cc <encoder-node>`: which loop-filter
   controls the node exposes, and that a deblocking request it cannot honour
   is refused rather than ignored.
+- `test/iris-encode-fence-probe.cc <encoder-node> <render-node> [w h]`:
+  whether an input surface's pending GPU write is waited for before the
+  picture is queued. It submits a buffer whose last GPU blit is still in
+  flight and compares the access unit against the picture before and after
+  that write; with the wait removed it encodes the stale picture, which is
+  what makes the comparison evidence rather than a coincidence.
+- `test/gpu-fence-check.cc <render-node> [w h]`: whether a GPU job leaves a
+  pollable pending fence on its destination after `glFlush()`. That is the
+  window the probe above depends on; if it is not observable on a GPU, no
+  probe can claim the wait mattered.
 
 ## Qualcomm Iris codec matrix
 
