@@ -162,6 +162,14 @@ uint64_t SlotPool::take_import_token(unsigned index)
     return token;
 }
 
+unsigned SlotPool::capture_queued_for(uint64_t token) const
+{
+    unsigned count = 0;
+    for (const auto& frame : capture_)
+        count += (frame->queued_ && frame->import_token_ == token) ? 1 : 0;
+    return count;
+}
+
 void SlotPool::queue_capture_scratch()
 {
     require(capture_memory_ == CaptureMemory::Import, "scratch on an Mmap pool");

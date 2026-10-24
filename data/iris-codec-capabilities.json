@@ -131,7 +131,7 @@
         "RGB"
       ],
       "publish_import": "fallback",
-      "import_note": "an alt-ref access unit decodes as two pictures: a one-buffer window stalls ~500 ms per alt-ref, a two-buffer window lets the firmware choose the buffer (153/609 misplaced). Copy until the translator submits one AU per picture",
+      "import_note": "an alt-ref access unit decodes as two pictures: a one-buffer window stalls ~500 ms per alt-ref, a two-buffer window lets the firmware choose the buffer (153/609 misplaced). The session lends one picture one buffer per completion (the same client buffer queued twice) and that runs clean on the target for FFmpeg (515/515, misplaced=0, framemd5 equal to the software decode), but Chrome releases a VP9 surface before its picture completes: 564 of 768 queueings abandoned, 541 completions dropped, against 2 and 4 for the H.264 control. Copy stays until the browser path is clean",
       "encode": {
         "production": "absent",
         "va_profiles": [],

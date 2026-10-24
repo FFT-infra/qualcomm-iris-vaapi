@@ -50,6 +50,11 @@ struct AccessUnit {
     // For a translator that holds pictures back: the surface the bytes in
     // this AU belong to, which is not the picture just translated.
     uint32_t released_surface = VA_INVALID_ID;
+    // How many CAPTURE completions the firmware produces for this access
+    // unit. VP9 packs an invisible frame and a show_existing_frame header
+    // into one superframe, and the firmware decodes that as two pictures,
+    // so the buffer the first one landed in is still needed by the second.
+    unsigned completions = 1;
 };
 
 class Translator {

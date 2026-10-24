@@ -79,6 +79,7 @@ void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit
     s.target.height = s.height;
     s.target.fourcc = s.fourcc;
     s.target.hidden = au.hidden;
+    s.target.completions = au.completions;
     s.failed = false;
     c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
     // The picture is in the session now: a client waiting for this surface

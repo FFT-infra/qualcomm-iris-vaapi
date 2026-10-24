@@ -30,11 +30,6 @@ constexpr int kSourceChangeWaitMs = 5000;
 // Bound on the client buffer's implicit fence before it is handed to the
 // firmware: the compositor may still be sampling the previous picture.
 constexpr int kImportFenceMs = 2000;
-// One client buffer with the firmware at a time. Measured: with several it
-// picks its own buffer for each picture (246/360 wrong in the cleanest
-// probe run; TEST-RESULTS.md 2026-09-22), so only an empty choice is a
-// determined one.
-constexpr unsigned kImportWindow = 1;
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -276,14 +271,21 @@ void Session::enter_streaming()
     // not. v4l2av1dec survives the same window only by luck of timing.
     device_->stream(Queue::Capture, true);
     if (pool_.capture_memory() == CaptureMemory::Import) {
+        // `lent` counts slots in the pool that exists now, and this is a new
+        // one: after a resolution change the slots an old entry was queued
+        // into are gone, so its count would otherwise say "already lent" for
+        // buffers the firmware never got.
+        for (ImportEntry& entry : import_backlog_)
+            entry.lent = 0;
         // Pictures already submitted (the first AU, or the one that
         // announced a resolution change) wait in the backlog; the first
-        // gets its buffer now, the rest follow one completion at a time.
+        // gets its buffers now, the rest follow one picture at a time.
         for (const auto& [token, target] : pending_) {
             const bool queued = std::any_of(import_backlog_.begin(), import_backlog_.end(),
                 [&](const ImportEntry& e) { return e.token == token; });
             if (!queued && target->destination)
-                import_backlog_.push_back({ token, fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0) });
+                import_backlog_.push_back({ token, fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0),
+                    target->completions, 0 });
         }
         queue_import_next();
     } else {
@@ -296,11 +298,29 @@ void Session::enter_streaming()
 
 void Session::queue_import_next()
 {
-    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty()
-        || pool_.capture_queued() >= kImportWindow)
+    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty())
         return;
-    const ImportEntry entry = import_backlog_.front();
+    ImportEntry& entry = import_backlog_.front();
+    const unsigned queued_for_this = pool_.capture_queued_for(entry.token);
+    // The window is one picture, not one buffer. A picture the firmware
+    // decodes as several (a VP9 alt-ref) gets a buffer for each of its
+    // completions, and only that picture's buffers are ever with it. Moving
+    // on to the next picture before this one is answered is what gave the
+    // firmware a choice, and a choice is what the misplaced count measures.
+    if (queued_for_this == 0 && entry.lent >= entry.completions) {
+        // Every buffer this picture needed has been lent and has come back:
+        // it is answered, or it was abandoned and its completion dropped.
+        const int fd = entry.fd;
+        import_backlog_.pop_front();
+        if (fd >= 0)
+            close(fd);
+        queue_import_next();
+        return;
+    }
+    if (entry.lent >= entry.completions)
+        return; // fully lent; the firmware still holds one of them
     if (entry.fd < 0) {
+        // No client buffer for this picture: nothing to queue, now or later.
         import_backlog_.pop_front();
         queue_import_next();
         return;
@@ -310,8 +330,10 @@ void Session::queue_import_next()
     if (target && (target->publish == Publish::Direct || !target->destination)) {
         // The client never gave this picture a buffer; nothing to decode
         // into. (An Import session requires every surface exported.)
+        const int fd = entry.fd;
         import_backlog_.pop_front();
-        close(entry.fd);
+        if (fd >= 0)
+            close(fd);
         pending_.erase(it);
         target->pending = false;
         target->error = true;
@@ -328,21 +350,33 @@ void Session::queue_import_next()
         // whatever is queued next and is reported misplaced.
         return;
     // The compositor may still be sampling the previous picture from this
-    // buffer; the firmware must not write under it.
-    const auto fence_start = std::chrono::steady_clock::now();
-    wait_dma_buf(entry.fd, true, kImportFenceMs);
-    const auto fence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - fence_start)
-                              .count();
-    if (fence_ms >= 20)
-        trace_("import fence token=%llu fd=%d waited=%lldms", static_cast<unsigned long long>(entry.token),
-            entry.fd, static_cast<long long>(fence_ms));
-    const auto slot = pool_.queue_capture_import(entry.fd, pool_.capture_layout().size, entry.token);
-    require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
-    import_backlog_.pop_front();
-    close(entry.fd);
-    trace_("import token=%llu index=%u fd=%d backlog=%zu abandoned=%d", static_cast<unsigned long long>(entry.token),
-        *slot, entry.fd, import_backlog_.size(), target == nullptr ? 1 : 0);
+    // buffer; the firmware must not write under it. The fence is waited for
+    // once per picture: every half of a superframe lands in the same client
+    // buffer, so the wait is on the buffer, not on the completion.
+    if (entry.lent == 0) {
+        const auto fence_start = std::chrono::steady_clock::now();
+        wait_dma_buf(entry.fd, true, kImportFenceMs);
+        const auto fence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - fence_start)
+                                  .count();
+        if (fence_ms >= 20)
+            trace_("import fence token=%llu fd=%d waited=%lldms", static_cast<unsigned long long>(entry.token),
+                entry.fd, static_cast<long long>(fence_ms));
+    }
+    // Every completion of this picture gets a slot now, not one per
+    // returned completion: the firmware does not hand the first half back
+    // before it has somewhere to put the second, and waiting for a return
+    // that needs a buffer is the stall this replaces. The slots all carry
+    // the same client buffer, so the firmware still has no choice between
+    // different pictures' memory — which is what the window rule protects.
+    while (entry.lent < entry.completions) {
+        const auto slot = pool_.queue_capture_import(entry.fd, pool_.capture_layout().size, entry.token);
+        require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
+        ++entry.lent;
+        trace_("import token=%llu index=%u fd=%d backlog=%zu abandoned=%d lent=%u/%u",
+            static_cast<unsigned long long>(entry.token), *slot, entry.fd, import_backlog_.size(),
+            target == nullptr ? 1 : 0, entry.lent, entry.completions);
+    }
 }
 
 void Session::clear_import_backlog()
@@ -363,6 +397,8 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
     require(state_ != SessionState::Finished, "decoder session finished", VA_STATUS_ERROR_OPERATION_FAILED);
     require(size > 0 && size <= config_.au_capacity, "access unit does not fit the OUTPUT slot",
         VA_STATUS_ERROR_NOT_ENOUGH_BUFFER);
+    require(target.completions >= 1, "a picture produces at least one completion",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
     // A target that still owns a token from an earlier picture is being
     // reused without release(); treat it as released.
     if (target.pending)
@@ -414,7 +450,7 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         // duplicated so the entry survives a released (or destroyed)
         // surface: its picture still needs a buffer.
         const int fd = target.destination ? fcntl(target.destination->fd(), F_DUPFD_CLOEXEC, 0) : -1;
-        import_backlog_.push_back({ token, fd });
+        import_backlog_.push_back({ token, fd, target.completions, 0 });
         queue_import_next();
     }
     trace_("submit token=%llu bytes=%zu output=%u", static_cast<unsigned long long>(token), size, slot->index);

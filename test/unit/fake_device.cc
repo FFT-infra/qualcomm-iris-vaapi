@@ -455,6 +455,15 @@ void FakeDevice::complete_one()
         return;
     }
     require(!capture_queue_.empty(), "fake: no free CAPTURE slot for completion");
+    if (altref_superframe_ && capture_queue_.size() < 2) {
+        // The firmware will not return the invisible half until it has a slot
+        // for the visible one; the picture waits in the OUTPUT queue instead
+        // of completing. This is the ~500 ms stall a one-buffer Import window
+        // produced on the target, modelled rather than timed.
+        output_queue_.push_front(au);
+        --decoded_since_stream_;
+        return;
+    }
     unsigned slot = capture_queue_.front();
     if (misorder_ > 0 && capture_queue_.size() > 1) {
         // Model a firmware that does not fill CAPTURE in QBUF order.

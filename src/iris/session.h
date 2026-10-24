@@ -59,6 +59,11 @@ struct Target {
     // The picture is decoded but never displayed (AV1 show_frame=0). The
     // node returns it without pixels, and that is not a decode failure.
     bool hidden = false;
+    // How many CAPTURE completions this picture produces. A VP9 alt-ref
+    // superframe is one VA picture the firmware decodes as two, and it wants
+    // a buffer for each half before it returns the first, so an Import pool
+    // queues this target's client buffer once per completion.
+    unsigned completions = 1;
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy / Import: where pixels go
     unsigned width = 0, height = 0;
@@ -204,9 +209,20 @@ private:
     // released target, because its picture was already submitted to the
     // OUTPUT queue and must still be given a buffer — a hole in the buffer
     // sequence shifts every later picture into a neighbour's buffer.
+    //
+    // `completions` is how many CAPTURE completions the picture produces and
+    // `lent` how many of its buffers are already with the firmware. A VP9
+    // alt-ref access unit is one VA picture the firmware decodes as two, and
+    // it wants a buffer for each half before it returns the first, so the
+    // entry is lent twice before the window moves on. The entry leaves the
+    // backlog when it has nothing left to lend and its token has been
+    // answered, which for a superframe is the second completion — never the
+    // first.
     struct ImportEntry {
         uint64_t token = 0;
         int fd = -1;
+        unsigned completions = 1;
+        unsigned lent = 0;
     };
     std::deque<ImportEntry> import_backlog_;
     void clear_import_backlog();

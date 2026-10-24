@@ -46,7 +46,11 @@ contexts=$(count 'va create_context id=')
 [ "$contexts" -gt 0 ] || contexts=1
 
 submitted=$(count 'submit token=')
-capture=$(grep -E -c 'capture (noshow )?token=.*publish=(direct|copy-gpu|copy-cpu)' "$log" || true)
+# Every publish policy a capture can name: the trace prints how the pixels
+# reached the client, and an Import capture is as much a published picture as
+# a Direct or a copied one. Leaving `import` out made a fully successful
+# Import run report capture=0.
+capture=$(grep -E -c 'capture (noshow )?token=.*publish=(direct|import|copy-gpu|copy-cpu)' "$log" || true)
 noshow=$(count 'capture noshow token=')
 drain=$(count 'drain complete last=1')
 capture_errors=$(grep -E -c 'publish=error|capture error index=' "$log" || true)

@@ -86,4 +86,18 @@ if sh "$root/test/iris-eos-check.sh" "$log" 2 2>/dev/null; then
     exit 1
 fi
 
+# An Import publish is a completed picture like any other: the firmware wrote
+# straight into the client's buffer. Counting only direct and copy made a
+# fully successful Import run report capture=0.
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+submit token=2
+capture token=1 index=0 flags=0x4010 publish=import
+capture token=2 index=0 flags=0x4010 publish=import
+capture last
+drain complete last=1
+EOF
+sh "$root/test/iris-eos-check.sh" "$log" 2 || exit 1
+
 echo 'PASS multi-context EOS checker'

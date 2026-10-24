@@ -343,6 +343,7 @@ void test_vp9_altref_superframe_is_one_picture()
     CHECK(a.completed && !a.error);
     h.fake->inject_altref_superframe();
     Target b;
+    b.completions = 2;
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
@@ -750,6 +751,82 @@ void test_import_resolution_change_rebuilds_import_pool()
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 0 DMABUF"));
 }
 
+void test_import_altref_gets_a_buffer_per_completion()
+{
+    // The firmware decodes a VP9 alt-ref superframe as two pictures and does
+    // not return the invisible half before it has a slot for the visible
+    // one. An Import pool that lent the picture one buffer therefore stalled
+    // on every alt-ref (~500 ms measured on the target, TEST-RESULTS.md
+    // 2026-09-22). Both halves land in the same client buffer, so lending it
+    // twice keeps the firmware's choice empty while giving it the room it
+    // needs.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    h.fake->tick(1);
+    h.session->wait(ta);
+    h.fake->inject_altref_superframe();
+    tb.completions = 2;
+    h.submit(tb);
+    // Two slots, both carrying the same client buffer, and nothing of the
+    // next picture.
+    CHECK(h.session->capture_queued() == 2);
+    CHECK(same_buffer(h.fake->capture_fd(0), b.fd));
+    CHECK(same_buffer(h.fake->capture_fd(1), b.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+}
+
+void test_import_altref_does_not_stall_the_next_picture()
+{
+    // With one buffer lent per picture, an alt-ref held the window: the next
+    // picture's buffer could not be queued until the first completion came
+    // back, and that completion needed the second half's slot. Nothing
+    // completes, so the session times out. Two buffers for the superframe
+    // and one picture at a time is what removes the deadlock.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout), c(layout);
+    Target ta, tb, tc;
+    ta.publish = tb.publish = tc.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    tc.destination = c.stable.get();
+    h.submit(tc);
+    h.fake->tick(1);
+    h.session->wait(tc);
+    h.fake->inject_altref_superframe();
+    ta.completions = 2;
+    h.submit(ta);
+    h.submit(tb);
+    // Still only the alt-ref's two buffers: the next picture waits its turn.
+    CHECK(h.session->capture_queued() == 2);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+    CHECK(same_buffer(h.fake->capture_fd(1), a.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(ta.completed && !ta.error);
+    // Its buffers came back, so the next picture's may go in.
+    CHECK(h.session->capture_queued() == 1);
+    CHECK(same_buffer(h.fake->capture_fd(0), b.fd) || same_buffer(h.fake->capture_fd(1), b.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().misplaced == 0);
+}
+
+
 } // namespace
 
 int main()
@@ -789,6 +866,8 @@ int main()
         { "import rejected on a layout mismatch", test_import_rejected_on_layout_mismatch },
         { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
         { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },
+        { "import alt-ref gets a buffer per completion", test_import_altref_gets_a_buffer_per_completion },
+        { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
     };
     int ran = 0;
     for (const auto& c : cases) {

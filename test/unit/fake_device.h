@@ -63,7 +63,10 @@ public:
     // Model a VP9 alt-ref superframe: the next picture completes twice under
     // one token, first as an ERROR completion with no picture-type bit and no
     // payload, then normally. The firmware does this for the invisible frame
-    // the translator packed a show_existing_frame into.
+    // the translator packed a show_existing_frame into. It does not return
+    // the invisible half before it has a slot for the visible one, so with
+    // fewer than two CAPTURE slots queued the picture simply waits — the
+    // stall a one-buffer Import window produced on the target.
     void inject_altref_superframe() { altref_superframe_ = true; }
     // Return EBUSY from START this many times.
     void inject_start_busy(unsigned count) { start_busy_ = count; }

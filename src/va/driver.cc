@@ -142,11 +142,16 @@ Capabilities probe_capabilities(const iris::Options& options)
     if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
     // import-qualified-end
-    // VP9 and AV1 are deliberately absent. VP9: an alt-ref access unit
-    // decodes as two pictures, so a one-buffer window stalls the firmware
-    // while two let it choose the buffer. AV1: the translator holds a picture
-    // until the successor arrives, so the client's buffer for it cannot be
-    // queued in lockstep (TEST-RESULTS.md, 2026-09-22 and 2026-10-22).
+    // VP9 and AV1 are deliberately absent. VP9: the session-side blocker is
+    // gone — lending one picture one buffer per completion ran clean on the
+    // target (FFmpeg 515/515, misplaced=0, framemd5 equal to the software
+    // decode) — but Chrome releases a VP9 surface before its picture
+    // completes far more often than it does for H.264: 564 of 768 queueings
+    // carried abandoned=1 and 541 completions were dropped, against 2 and 4
+    // for the H.264 control. VP9 qualifies once that path is clean, not
+    // before. AV1: the translator holds a picture until the successor
+    // arrives, so the client's buffer for it cannot be queued in lockstep
+    // (TEST-RESULTS.md, 2026-09-22, 2026-10-22 and 2026-10-24).
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.
