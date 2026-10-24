@@ -1579,7 +1579,7 @@ the driver:
   firmware writes SPS/PPS and the driver will not put a second, possibly
   disagreeing set in the stream. `vah264enc`/`vah265enc` therefore do not
   work. Radxa's backend answers `VA_ENC_PACKED_HEADER_NONE`, which fails the
-  same check, so this is not a gap against piano.
+  same check, so this is not a gap against libva-v4l2.
 
 ### MP4 without a remux
 
@@ -2540,9 +2540,9 @@ sequence and picture buffers are now locals in every affected case.
 `rollback.sh` restores the stock module; `cp qcom-iris.0003.ko.zst` over
 the installed file restores the previous patched module. Both need a reboot.
 
-## Against piano, on the same tablet (2026-10-22)
+## Against libva-v4l2 (Radxa), on the same tablet (2026-10-22)
 
-piano (`radxa-pkg/libva-v4l2` 1.0.0, the sibling backend) publishes
+libva-v4l2 (`radxa-pkg/libva-v4l2` 1.0.0, the Radxa sibling backend) publishes
 throughput for SC8280XP on a Radxa Dragon Q8B. Those numbers cannot be
 read against this tablet's: a different SoC, a different Iris generation
 and a different firmware build. The comparison below runs both drivers
@@ -2554,7 +2554,7 @@ on sheng instead, in the same boot, through the same FFmpeg.
   `build-def/src/v4l2_drv_video.so` SHA-256
   `f3b37e6ad91b76b5ba1b9ec20af055f9494594fec4207a6638313558a3239f24`,
   built on the target with `buildtype=debugoptimized`.
-- piano at tag `v1.0.0` (`0e4ce1e`), built on the target with
+- libva-v4l2 at tag `v1.0.0` (`0e4ce1e`), built on the target with
   `buildtype=release` and its default `-Dfastcv=disabled`; SHA-256
   `798cfd62a91c51be733aa8f28b98b1289a30dd7b0cca4d1c84cda7b6efac7937`.
   Its own release packages disable FastCV the same way, and sheng's CDSP
@@ -2575,7 +2575,7 @@ on sheng instead, in the same boot, through the same FFmpeg.
 
 ### Decode, synthetic clips (frames/s, no download)
 
-| Clip | This driver | piano | piano vs this |
+| Clip | This driver | libva-v4l2 | libva-v4l2 vs this |
 | --- | ---: | ---: | ---: |
 | H.264 720p | 907 | 836 | -8% |
 | H.264 1080p | 760 | 681 | -10% |
@@ -2591,18 +2591,18 @@ which is the opposite of what the HEVC slice rewrite would predict: both
 drivers re-emit HEVC slice headers there, and neither rewrites H.264
 slices (both copy them verbatim). The cause was not isolated. What the
 table supports is narrower than a mechanism: on this firmware this
-driver keeps more of a 4K stream's time off the CPU than piano does, and
+driver keeps more of a 4K stream's time off the CPU than libva-v4l2 does, and
 the difference shrinks to single digits at 1080p and below. The 4K HEVC
-runs are the noisiest cell (piano 2.03 to 2.78 s, this driver 1.45 to
-1.59 s); even piano's fastest run is slower than this driver's slowest.
+runs are the noisiest cell (libva-v4l2 2.03 to 2.78 s, this driver 1.45 to
+1.59 s); even libva-v4l2's fastest run is slower than this driver's slowest.
 
-piano advertises no AV1 profile, so `-hwaccel vaapi` on the AV1 clip
+libva-v4l2 advertises no AV1 profile, so `-hwaccel vaapi` on the AV1 clip
 fails at `av1 @ … Failed setup for format vaapi` before a single picture
 is submitted (exit 69, IRQ delta 0).
 
 ### Decode, real content with B-frames (frames/s)
 
-| Clip | This driver | piano | piano vs this |
+| Clip | This driver | libva-v4l2 | libva-v4l2 vs this |
 | --- | ---: | ---: | ---: |
 | H.264 High, 2 B-frames, 1080p24 | 311 | 311 | -0.0% |
 | HEVC Main, 2 B-frames, 1080p24 | 492 | 493 | -0.2% |
@@ -2612,7 +2612,7 @@ is submitted (exit 69, IRQ delta 0).
 On reordered, 10-bit and alt-ref content the two drivers are the same
 within run-to-run noise: what is left is firmware time, and neither
 driver's bookkeeping shows through. The synthetic-clip gap is therefore
-a cost on the path this driver takes and piano does not, not a general
+a cost on the path this driver takes and libva-v4l2 does not, not a general
 decode difference.
 
 Frame exactness was checked for the 1080p H.264 and HEVC clips by
@@ -2632,7 +2632,7 @@ same encode contract; whatever differs below is not the coded core.
 Throughput at that setting, 300 frames, `-async_depth 1` and `4`, three
 runs per cell, mean:
 
-| Clip | This driver d=1 | piano d=1 | This driver d=4 | piano d=4 |
+| Clip | This driver d=1 | libva-v4l2 d=1 | This driver d=4 | libva-v4l2 d=4 |
 | --- | ---: | ---: | ---: | ---: |
 | H.264 1080p | 235 fps | 196 fps | 439 fps | 424 fps |
 | HEVC 1080p | 249 fps | 208 fps | 453 fps | 423 fps |
@@ -2641,8 +2641,8 @@ runs per cell, mean:
 
 This driver is ahead in every cell: 13 to 17% at depth 1, and 2 to 7% at
 depth 4, where the two converge because the firmware, not the driver, is
-the constraint. A single earlier run had piano 10% ahead at depth 4 on
-1080p; the three-run repeats above do not reproduce it (piano 0.65 to
+the constraint. A single earlier run had libva-v4l2 10% ahead at depth 4 on
+1080p; the three-run repeats above do not reproduce it (libva-v4l2 0.65 to
 0.80 s against this driver's 0.53 to 0.78 s), so that reading was
 noise. Both drivers scale the same way, and this driver's own pipelining
 record (depth 1 to 4, 190 to 374 fps, byte-identical output) is above.
@@ -2650,9 +2650,9 @@ record (depth 1 to 4, 190 to 374 fps, byte-identical output) is above.
 ### Encode, rate control: an open difference
 
 At a rate target the two drivers do not agree, and the gap is on
-piano's side of the comparison:
+libva-v4l2's side of the comparison:
 
-| Request | This driver | piano |
+| Request | This driver | libva-v4l2 |
 | --- | ---: | ---: |
 | CQP `-q:v 24` | 3045 kbit/s | 3045 kbit/s (identical bytes) |
 | CBR 4 Mbit/s | 4034 kbit/s | 741 kbit/s |
@@ -2660,11 +2660,11 @@ piano's side of the comparison:
 | VBR 4 Mbit/s | 9780 kbit/s | 808 kbit/s |
 
 600 frames of `sintel-1080p30-h264-b3.mp4` at 30 fps; the kbit/s figure
-is bytes x 8 / 20 s. This driver tracks the request; piano does not move
+is bytes x 8 / 20 s. This driver tracks the request; libva-v4l2 does not move
 with it. The same 4 Mbit/s request on `testsrc2` gives 4034 against
 1854195 bytes over 20 s, i.e. the same shape.
 
-What was ruled out on piano, each by rebuilding it and re-measuring:
+What was ruled out on libva-v4l2, each by rebuilding it and re-measuring:
 
 - **Its own values.** With `IRIS_VAAPI_DEBUG=1` it reports
   `bitrate=4000000 peak=4000000 mode=2 (CBR)`, so the client's request
@@ -2680,7 +2680,7 @@ What was ruled out on piano, each by rebuilding it and re-measuring:
   this driver left this driver's output unchanged at 4034.
 - **QP bounds.** Pinning 1..51, and passing `-qmin/-qmax` through
   FFmpeg, left both drivers unchanged.
-- **The control list.** A scratch copy of this driver with piano's exact
+- **The control list.** A scratch copy of this driver with libva-v4l2's exact
   control list (GOP `INT_MAX`, header mode, min/max QP) still produced
   4039 kbit/s.
 
@@ -2688,8 +2688,8 @@ So the difference is not in the control writes either driver makes, and
 the root cause was not isolated. It is recorded as an open item rather
 than attributed. The observation that stands: on this target, at these
 settings, this driver's rate control follows the client's request and
-piano's does not. One shape is worth checking first in any follow-up:
-piano's output at every target lands near 700 to 900 kbit/s, which is
+libva-v4l2's does not. One shape is worth checking first in any follow-up:
+libva-v4l2's output at every target lands near 700 to 900 kbit/s, which is
 close to what a fixed QP near its default 20 would give on this content,
 so a firmware that ignores its rate-control property while honouring
 explicit QP would look exactly like this. That is a hypothesis, not a
@@ -2697,11 +2697,11 @@ finding; it was not tested.
 
 ### What this comparison does not show
 
-- It does not reproduce piano's published SC8280XP numbers, and does not
+- It does not reproduce libva-v4l2's published SC8280XP numbers, and does not
   claim to: the SoC, the Iris generation and the firmware differ.
 - It says nothing about Chrome, mpv, VLC or GStreamer. Those runs are in
-  the client-coverage section above and have no piano counterpart here.
-- The `-Dfastcv=disabled` build is piano's own default and the only one
+  the client-coverage section above and have no libva-v4l2 counterpart here.
+- The `-Dfastcv=disabled` build is libva-v4l2's own default and the only one
   obtainable on this tablet, but it is not the configuration its README
   describes when it lists FastCV VPP as a feature.
 - Three runs per cell throughout. The encode cells at depth 4 still
@@ -2711,10 +2711,10 @@ finding; it was not tested.
   spread.
 - The VP9 and AV1 rows are one clip each at one resolution. The VP9 row
   shows the two drivers agree where both decode; the AV1 row shows only
-  that piano has no AV1 entrypoint on this node, not how an AV1
+  that libva-v4l2 has no AV1 entrypoint on this node, not how an AV1
   implementation of its own would compare.
 
-## AV1 Profile 0 at 10-bit, and the browser matrix beside piano (2026-10-22)
+## AV1 Profile 0 at 10-bit, and the browser matrix beside libva-v4l2 (2026-10-22)
 
 Source `72873c8` plus the working-tree change that adds
 `p010_decode_profile()`, driver build tree only
@@ -2769,13 +2769,14 @@ both directions, so the next profile cannot drift from the document.
 | --- | --- | --- |
 | This driver, VA-API, P010 | 30 | 30/30 |
 
-### Browser acceptance, this driver versus piano
+### Browser acceptance, this driver versus libva-v4l2
 
 Same harness (`test/iris-browser-acceptance.sh`), same clips, 20 s window,
-build-tree driver on both sides. piano is `radxa-pkg/libva-v4l2` 1.0.0
-built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`).
+build-tree driver on both sides. libva-v4l2 is the Radxa backend, 1.0.0
+built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`; the
+scratch directory keeps the name the run used).
 
-| Clip | This driver | piano |
+| Clip | This driver | libva-v4l2 |
 | --- | --- | --- |
 | H.264 High 1080p, B-frames | `VaapiVideoDecoder`, platform, 482 frames, 0 dropped | same, 481 frames, 0 dropped |
 | HEVC Main 1080p | `VaapiVideoDecoder`, platform, 483 frames, 0 dropped | same, 482 frames, 0 dropped |
@@ -2786,8 +2787,8 @@ built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`).
 
 Every row that passed also shows a Chrome GPU process holding the resolved
 Iris node (`--type=gpu-process` in `iris-node-holders.txt`), and a boot ID
-unchanged across the run. The AV1 rows on piano fall back to software
-because piano's `vainfo` lists no `VAProfileAV1Profile0`; the HEVC Main10
+unchanged across the run. The AV1 rows on libva-v4l2 fall back to software
+because libva-v4l2's `vainfo` lists no `VAProfileAV1Profile0`; the HEVC Main10
 row is a harder failure, the element itself errors and nothing is decoded.
 Both were re-run once to confirm.
 
