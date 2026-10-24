@@ -140,6 +140,11 @@ private:
     // The firmware answered the drain marker (V4L2_ENC_CMD_STOP).
     bool drained_ = false;
     EncodeParams applied_;
+    // The reconstruction surface of the last submitted picture. The encoder
+    // has no reference management of its own: it codes against the picture it
+    // just produced, so this is the only legal reference for the next inter
+    // picture.
+    uint32_t last_reconstruction_ = 0;
 
     std::vector<CaptureSlot> capture_;
     std::deque<unsigned> free_output_;

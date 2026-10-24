@@ -66,6 +66,9 @@ template <typename Function> VAStatus status_of(Function&& body)
 
 constexpr unsigned kCaptureSlot = 1u << 20;
 constexpr uint32_t kPayload = 1024;
+// The reconstruction surface the first picture occupies; P pictures name it
+// as their reference and move to the next one.
+constexpr uint32_t kReconstruction = 0x1000;
 
 class FakeEncoderNode final : public iris::Device {
 public:
@@ -334,6 +337,10 @@ std::unique_ptr<iris::EncoderSession> make_session(bool loop_filter_controls, ui
         std::move(device), config, iris::Options {}, iris::Trace(false));
 }
 
+// A stream of pictures in the shape a real client sends: an intra picture
+// first, then P pictures that each predict from the surface the previous one
+// reconstructed. The session refuses anything else, so a fixture that skipped
+// these would test a stream no client can produce.
 iris::EncodeParams params(int deblock_mode, int alpha, int beta)
 {
     iris::EncodeParams out;
@@ -344,8 +351,24 @@ iris::EncodeParams params(int deblock_mode, int alpha, int beta)
     out.deblock_mode = deblock_mode;
     out.deblock_alpha = alpha;
     out.deblock_beta = beta;
+    out.intra = true;
+    out.reconstruction = kReconstruction;
     return out;
 }
+
+// A P picture that predicts from the surface the previous one reconstructed.
+iris::EncodeParams p_params(uint32_t reference = kReconstruction, uint32_t reconstruction = kReconstruction + 1)
+{
+    iris::EncodeParams out = params(0, 0, 0);
+    out.intra = false;
+    out.reference = reference;
+    out.reconstruction = reconstruction;
+    return out;
+}
+
+// The reconstruction surface of picture `n` in a chain that started at
+// kReconstruction. The first picture is intra and reconstructs kReconstruction.
+uint32_t reconstruction_of(unsigned n) { return kReconstruction + n; }
 
 int dmabuf()
 {
@@ -493,9 +516,22 @@ void test_timestamps_never_go_backwards()
     check(fd >= 0, "memfd for the raw frame");
     // Pictures 1..9 and 11 carry no FrameRate misc, the way FFmpeg encodes
     // them; picture 0 and the IDR at picture 10 do.
-    std::vector<iris::EncodeParams> stream(12, params(0, 0, 0));
-    stream[0] = with_rate;
-    stream[10] = with_rate;
+    std::vector<iris::EncodeParams> stream;
+    for (unsigned i = 0; i < 12; ++i) {
+        if (i == 0 || i == 10) {
+            // An intra picture: it reconstructs the next surface and needs
+            // no reference.
+            iris::EncodeParams picture = params(0, 0, 0);
+            picture.reconstruction = reconstruction_of(i);
+            stream.push_back(picture);
+        } else {
+            stream.push_back(p_params(reconstruction_of(i - 1), reconstruction_of(i)));
+        }
+    }
+    stream[0].frame_rate_num = 24;
+    stream[0].frame_rate_den = 1;
+    stream[10].frame_rate_num = 24;
+    stream[10].frame_rate_den = 1;
     for (const iris::EncodeParams& picture : stream) {
         const iris::EncodeResult result = session.encode(fd, kCaptureSlot, picture);
         check(result.bytes.size() == kPayload, "every picture returns its access unit");

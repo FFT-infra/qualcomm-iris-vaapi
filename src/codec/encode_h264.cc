@@ -56,6 +56,22 @@ int level_menu(uint8_t idc)
     return menu;
 }
 
+// VA slice types are the H.264 syntax values 0..2 and 5..7 (no switching
+// slices). Modulo 5: 0 is P, 1 is B, 2 is I. The firmware writes one slice per
+// picture and owns the picture type, so the only thing worth reading is
+// whether the client asked for an intra picture without an IDR: that request
+// is the one the driver has to promote, because Iris' FORCE_KEY_FRAME emits
+// an IDR.
+bool intra_slice(uint8_t slice_type)
+{
+    return slice_type % 5 == 2;
+}
+
+bool p_slice(uint8_t slice_type)
+{
+    return slice_type % 5 == 0;
+}
+
 int profile_menu(VAProfile profile)
 {
     switch (profile) {
@@ -123,6 +139,7 @@ public:
         out.gop_size = sequence->intra_period;
         out.cabac = params->pic_fields.bits.entropy_coding_mode_flag != 0;
         out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
+        out.reconstruction = params->CurrPic.picture_id;
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {
@@ -179,7 +196,46 @@ public:
                 VA_STATUS_ERROR_UNIMPLEMENTED);
             require(slice->num_ref_idx_l0_active_minus1 == 0 && slice->num_ref_idx_l1_active_minus1 == 0,
                 "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            // One slice has to cover the whole picture: the firmware decides
+            // the slice layout, and a partial slice would code a partial
+            // frame.
+            require(slice->macroblock_address == 0
+                    && slice->num_macroblocks
+                        == unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs,
+                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(intra_slice(slice->slice_type) || p_slice(slice->slice_type),
+                "only I and P slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(!params->pic_fields.bits.idr_pic_flag || intra_slice(slice->slice_type),
+                "an IDR needs an I slice", VA_STATUS_ERROR_INVALID_PARAMETER);
+            out.intra = intra_slice(slice->slice_type);
+            // An intra picture needs no reference; an inter picture must name
+            // the one the session knows about.
+            if (!out.intra) {
+                const VAPictureH264& ref = slice->RefPicList0[0];
+                const bool valid = ref.picture_id != VA_INVALID_SURFACE
+                    && !(ref.flags & (VA_PICTURE_H264_INVALID | VA_PICTURE_H264_LONG_TERM_REFERENCE));
+                require(valid, "an inter picture needs a short-term reference",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+                out.reference = ref.picture_id;
+            }
+            // A non-IDR intra picture is a request the firmware cannot take
+            // literally: Iris has only FORCE_KEY_FRAME, which emits an IDR.
+            // Promote it, which is what the reference driver does. Dropping
+            // the request would let the firmware code this picture as a P and
+            // silently misorder the stream.
+            if (out.intra) {
+                out.promoted = !out.keyframe;
+                out.keyframe = true;
+            }
+        } else {
+            // No slice parameters: nothing says the picture is intra, so the
+            // firmware codes it as a P. An IDR without a slice is the client
+            // contradicting itself.
+            require(!params->pic_fields.bits.idr_pic_flag, "an IDR needs an I slice",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
         }
+        require(params->pic_fields.bits.reference_pic_flag != 0,
+            "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);

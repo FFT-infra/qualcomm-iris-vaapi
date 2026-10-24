@@ -44,6 +44,16 @@ int level_menu(uint8_t idc)
     return menu;
 }
 
+// HEVC slice types: 0 is B, 1 is P, 2 is I. The firmware writes one slice per
+// picture and owns the picture type, so the only thing worth reading is
+// whether the client asked for an intra picture without an IDR: that request
+// is the one the driver has to promote, because Iris' FORCE_KEY_FRAME emits
+// an IDR and an HEVC CRA has no control behind it.
+bool intra_slice(uint8_t slice_type)
+{
+    return slice_type == 2;
+}
+
 class HevcEncoder final : public Encoder {
 public:
     HevcEncoder(VAProfile profile, RateMode rate_mode)
@@ -98,6 +108,7 @@ public:
 
         EncodeParams out;
         out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
+        out.reconstruction = params->decoded_curr_pic.picture_id;
         out.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
         out.level = level_menu(sequence->general_level_idc);
         out.rate_mode = rate_mode_;
@@ -174,7 +185,40 @@ public:
                     && !slice->slice_fields.bits.dependent_slice_segment_flag
                     && !slice->slice_fields.bits.colour_plane_id,
                 "unsupported HEVC slice features", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,
+                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(slice->slice_type == 2 || slice->slice_type == 1,
+                "only I and P slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(!params->pic_fields.bits.idr_pic_flag || intra_slice(slice->slice_type),
+                "an IDR needs an I slice", VA_STATUS_ERROR_INVALID_PARAMETER);
+            out.intra = intra_slice(slice->slice_type);
+            if (!out.intra) {
+                const VAPictureHEVC& ref = slice->ref_pic_list0[0];
+                const bool valid = ref.picture_id != VA_INVALID_SURFACE
+                    && !(ref.flags & (VA_PICTURE_HEVC_INVALID | VA_PICTURE_HEVC_LONG_TERM_REFERENCE));
+                require(valid, "an inter picture needs a short-term reference",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+                out.reference = ref.picture_id;
+            }
+            // A non-IDR intra picture (FFmpeg sends an HEVC CRA for its I
+            // pictures) has no control behind it. Promote it to an IDR the
+            // same way the reference driver does; ignoring the request would
+            // let the firmware code it as a P.
+            if (out.intra) {
+                out.promoted = !out.keyframe;
+                out.keyframe = true;
+            }
+        } else {
+            require(!params->pic_fields.bits.idr_pic_flag, "an IDR needs an I slice",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
         }
+        require(params->pic_fields.bits.reference_pic_flag != 0,
+            "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        // The client's coding_type must agree with the slice it wrote: the
+        // firmware derives the picture type from the slice, and a mismatch
+        // means the two buffers describe different pictures.
+        require(params->pic_fields.bits.coding_type == (out.intra ? 1u : 2u),
+            "coding_type does not match the slice type", VA_STATUS_ERROR_INVALID_PARAMETER);
         out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);

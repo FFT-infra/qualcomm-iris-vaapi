@@ -143,6 +143,13 @@ struct Context {
     struct EncSubmitted {
         iris::EncodeTicket ticket;
         std::shared_ptr<iris::EncoderSession> session;
+        // The coded buffer the client named for this picture. vaSyncSurface
+        // on the input surface and vaSyncBuffer / vaMapBuffer on the coded
+        // buffer are two ways to claim one completion, and GStreamer's
+        // encoder calls both. Whichever arrives first stores the access unit
+        // in that buffer, so the second finds the bytes instead of a second,
+        // empty answer.
+        VABufferID coded = VA_INVALID_ID;
     };
     std::map<VASurfaceID, EncSubmitted> enc_submitted;
 
@@ -243,6 +250,14 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id);
 // pipeline pictures: vaapi_encode.c enables async_encode when this call
 // does not answer VA_STATUS_ERROR_UNIMPLEMENTED.
 VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns);
+// Claim the completion behind a coded buffer and keep the access unit on it.
+// The three entry points a client may use to collect one picture —
+// vaSyncSurface on the input surface, vaSyncBuffer and vaMapBuffer on the
+// coded buffer — all funnel through here, so whichever arrives first stores
+// the bytes and the others find them. A second claim of the same ticket does
+// nothing. `timeout_ns` follows vaSyncBuffer: VA_TIMEOUT_INFINITE waits, zero
+// only asks, and a timeout leaves the ticket in place to ask again.
+VAStatus claim_coded(DriverData& d, const std::shared_ptr<Buffer>& b, uint64_t timeout_ns);
 VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatus* status);
 VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count);
 VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_type, uint32_t flags, void* descriptor);

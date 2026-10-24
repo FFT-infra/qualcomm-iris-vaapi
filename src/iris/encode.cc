@@ -402,6 +402,18 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
     apply_dynamic(params);
 
+    // The encoder node has no source-change and no way to code against a
+    // reference it was not given, so the stream has to start on an intra
+    // picture and every inter picture has to predict from the one just
+    // coded. Both are checked here rather than in the codec layer because
+    // only the session knows what it already submitted.
+    require(params.intra || last_reconstruction_ != 0, "the encoder must start with an intra picture",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    if (!params.intra) {
+        require(params.reference != 0 && params.reference == last_reconstruction_,
+            "an inter picture must reference the previous picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+    }
+
     // A requested IDR has two possible levers. A kernel that carries the
     // REQUEST_SYNC_FRAME capability exposes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME
     // and that is the direct request. Kernel branch 7.2.6 does not, and there
@@ -452,6 +464,8 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     submitted.params = params;
     submitted.force_idr = force_idr;
     issued_us_ = timestamp_us;
+    // The next inter picture may predict from this one.
+    last_reconstruction_ = params.reconstruction;
     pending_.push_back(std::move(submitted));
     return pending_.back().ticket;
 }
@@ -493,8 +507,8 @@ bool EncoderSession::complete_one()
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
     // evidence (an IDR NAL at every GOP boundary).
-    trace_("encode frame index=%u bytes=%zu idr=%d", frames_++, result.bytes.size(),
-        picture.params.keyframe ? 1 : 0);
+    trace_("encode frame index=%u bytes=%zu idr=%d promoted=%d", frames_++, result.bytes.size(),
+        picture.params.keyframe ? 1 : 0, picture.params.promoted ? 1 : 0);
     completed_.emplace(picture.ticket.timestamp_us, std::move(result));
 
     if (!done->last())

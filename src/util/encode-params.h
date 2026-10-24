@@ -42,10 +42,28 @@ struct EncodeParams {
     int deblock_mode = 0;
     int deblock_alpha = 0;
     int deblock_beta = 0;
-    // This picture must be an IDR (VA's idr_pic_flag). The firmware has no
-    // force-keyframe control, so the session uses the intra period for one
-    // picture; see EncoderSession::encode().
+    // This picture must be an IDR. True when the client set VA's
+    // idr_pic_flag, and also when it asked for an intra picture without one
+    // (a non-IDR I picture, or an HEVC CRA): Iris has only FORCE_KEY_FRAME,
+    // which emits an IDR, so that request is promoted rather than ignored.
+    // The firmware has no force-keyframe control, so the session uses the
+    // intra period for one picture; see EncoderSession::submit().
     bool keyframe = false;
+    // The picture became an IDR only because `intra` was set and the client
+    // did not set idr_pic_flag. Trace-only: it is the difference between
+    // honouring a request and promoting one, and the two produce the same
+    // bitstream, so nothing but the trace can tell them apart.
+    bool promoted = false;
+    // The picture's slice is intra-coded (H.264 I slice, HEVC I slice). The
+    // session refuses to start a stream on anything else.
+    bool intra = false;
+    // VA surface ids from the client's picture buffer: the reconstruction
+    // surface this picture will occupy, and the picture it predicts from.
+    // The session enforces the one-reference contract with them. 0 is the
+    // "none" value, because a VA surface id is never 0 and this header does
+    // not include va.h.
+    uint32_t reconstruction = 0;
+    uint32_t reference = 0;
 };
 
 } // namespace iris

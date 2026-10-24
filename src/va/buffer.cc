@@ -69,31 +69,59 @@ VAStatus destroyBuffer(VADriverContextP ctx, VABufferID id)
     return VA_STATUS_SUCCESS;
 }
 
-VAStatus mapBuffer(VADriverContextP ctx, VABufferID id, void** mapped)
+VAStatus claim_coded(DriverData& d, const std::shared_ptr<Buffer>& b, uint64_t timeout_ns)
 {
-    auto& d = data(ctx);
-    std::shared_ptr<Buffer> b;
     std::optional<iris::EncodeTicket> ticket;
     std::shared_ptr<iris::EncoderSession> session;
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        b = buffer(d, id);
-        // A coded buffer whose picture has not been claimed yet. The client
-        // either called vaSyncBuffer already (then this is empty) or is
-        // using the older contract where reading the buffer implies waiting.
-        if (b->type == VAEncCodedBufferType && b->ticket) {
-            ticket = b->ticket;
-            session = b->coded_session;
-        }
+        // Nothing outstanding means somebody already claimed this picture —
+        // vaSyncSurface on the input surface, or an earlier syncBuffer or
+        // mapBuffer — and the bytes are on the buffer. Success is the
+        // answer, not "unknown buffer".
+        if (b->type != VAEncCodedBufferType || !b->ticket)
+            return VA_STATUS_SUCCESS;
+        ticket = b->ticket;
+        session = b->coded_session;
     }
-    if (ticket) {
-        iris::require(bool(session), "coded buffer lost its encode session", VA_STATUS_ERROR_INVALID_CONTEXT);
-        const iris::EncodeResult result = session->wait(*ticket);
+    iris::require(bool(session), "coded buffer lost its encode session", VA_STATUS_ERROR_INVALID_CONTEXT);
+    const iris::EncodeResult result = session->wait_timeout(*ticket, timeout_ns);
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    // An empty result is the session saying this ticket was already answered,
+    // which happens when another thread claimed it between the read above and
+    // this wait. The bytes are on the buffer already; overwriting them with
+    // nothing is the bug this function exists to remove.
+    if (result.bytes.empty())
+        return VA_STATUS_SUCCESS;
+    iris::require(result.bytes.size() <= b->size, "coded buffer is too small", VA_STATUS_ERROR_ENCODING_ERROR);
+    b->payload = result.bytes;
+    b->segment.size = static_cast<uint32_t>(b->payload.size());
+    b->segment.bit_offset = 0;
+    b->segment.status = 0;
+    b->segment.reserved = 0;
+    b->segment.buf = b->payload.empty() ? nullptr : b->payload.data();
+    b->segment.next = nullptr;
+    b->ticket.reset();
+    b->coded_session.reset();
+    return VA_STATUS_SUCCESS;
+}
+
+VAStatus mapBuffer(VADriverContextP ctx, VABufferID id, void** mapped)
+{
+    auto& d = data(ctx);
+    std::shared_ptr<Buffer> b;
+    {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        iris::require(result.bytes.size() <= b->size, "coded buffer is too small", VA_STATUS_ERROR_ENCODING_ERROR);
-        b->payload = result.bytes;
-        b->ticket.reset();
-        b->coded_session.reset();
+        b = buffer(d, id);
+    }
+    // A coded buffer whose picture has not been claimed yet. The client
+    // either called vaSyncBuffer or vaSyncSurface already (then nothing is
+    // outstanding and this returns at once) or is using the older contract
+    // where reading the buffer implies waiting.
+    if (b->type == VAEncCodedBufferType) {
+        const VAStatus status = claim_coded(d, b, VA_TIMEOUT_INFINITE);
+        if (status != VA_STATUS_SUCCESS)
+            return status;
     }
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     auto it = d.buffers.find(id);

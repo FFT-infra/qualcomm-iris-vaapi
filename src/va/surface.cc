@@ -302,6 +302,21 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
             }
         }
         if (encoded) {
+            // Claim it into the coded buffer the client named, not into a
+            // local. The access unit is the client's, and GStreamer's encoder
+            // syncs the surface and then maps the coded buffer; throwing the
+            // bytes away here left that map with nothing to return.
+            if (encoded->session && encoded->coded != VA_INVALID_ID) {
+                std::shared_ptr<Buffer> coded;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                    auto it = d.buffers.find(encoded->coded);
+                    if (it != d.buffers.end())
+                        coded = it->second;
+                }
+                if (coded)
+                    return claim_coded(d, coded, VA_TIMEOUT_INFINITE);
+            }
             if (encoded->session)
                 encoded->session->wait(encoded->ticket);
             return VA_STATUS_SUCCESS;
@@ -324,8 +339,6 @@ VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns)
         if (id == VA_INVALID_ID)
             return VA_STATUS_SUCCESS;
         std::shared_ptr<Buffer> b;
-        std::optional<iris::EncodeTicket> ticket;
-        std::shared_ptr<iris::EncoderSession> session;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             b = buffer(d, id);
@@ -334,29 +347,12 @@ VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns)
             // success here means.
             if (b->type != VAEncCodedBufferType)
                 return VA_STATUS_SUCCESS;
-            if (b->ticket) {
-                ticket = b->ticket;
-                session = b->coded_session;
-            }
         }
-        if (!ticket)
-            return VA_STATUS_SUCCESS;
-        iris::require(bool(session), "coded buffer lost its encode session", VA_STATUS_ERROR_INVALID_CONTEXT);
-        // The bytes are kept by the session until they are claimed, so a
-        // timeout does not lose them: the client asks again and gets the
-        // same access unit.
-        const iris::EncodeResult result = session->wait_timeout(*ticket, timeout_ns);
-        std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        iris::require(result.bytes.size() <= b->size, "coded buffer is too small", VA_STATUS_ERROR_ENCODING_ERROR);
-        b->payload = result.bytes;
-        b->segment.size = static_cast<uint32_t>(b->payload.size());
-        b->segment.bit_offset = 0;
-        b->segment.status = 0;
-        b->segment.buf = b->payload.empty() ? nullptr : b->payload.data();
-        b->segment.next = nullptr;
-        b->ticket.reset();
-        b->coded_session.reset();
-        return VA_STATUS_SUCCESS;
+        // The same claim vaMapBuffer makes, and the same one vaSyncSurface
+        // makes on the input surface: whichever of the three arrives first
+        // stores the access unit, and the others find it instead of getting a
+        // second, empty answer. GStreamer's encoder calls two of them.
+        return claim_coded(d, b, timeout_ns);
     });
 }
 

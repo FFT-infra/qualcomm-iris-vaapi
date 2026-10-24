@@ -6,6 +6,17 @@ Run the host-side unit tests without hardware:
 meson test -C build-local
 ```
 
+## On an installed system
+
+`scripts/iris-verify.sh` is the user-facing check, not a gate: it generates
+its own clip, requires libva to open the driver with no environment set,
+requires a decode and an encode to each move the Iris interrupt counter, and
+requires the encoded stream to decode. `scripts/iris-device-check.sh` is the
+read-only report in front of it: which nodes exist, what each queue exposes,
+which optional kernel controls are present. Neither is a substitute for the
+gates below; both are what to run first when a report says "hardware decode
+does not work".
+
 ## Hardware Gates
 On the tablet, run the following verification gates:
 - `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
@@ -26,7 +37,13 @@ Two probes build with the tree and run on the target only:
 
 - `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
   acceptance program — proves the firmware writes picture k into the k-th
-  queued client DMA-BUF (docs/architecture.md §9).
+  queued client DMA-BUF (docs/architecture.md §9). The stream must be an
+  H.264 Annex-B file with one AUD per picture and flat luma encoding the
+  decode-order index (`16 + 2*(k%100)`), and it must be **High or Main
+  profile**: x264's `-qp 0` produces High 4:4:4 Predictive, which the
+  firmware rejects with `session error 0x4000008 unsupported stream` and no
+  SOURCE_CHANGE, so the probe exits at bring-up. `-qp 1 -profile:v high`
+  is lossless enough for the grey values and decodes.
 - `test/iris-va-import-probe.cc <render-node>`: the same client memory
   entered through the public API. It needs `LIBVA_DRIVER_NAME=v4l2` and
   `LIBVA_DRIVERS_PATH` pointing at the build tree; it checks DRM_PRIME_2 and

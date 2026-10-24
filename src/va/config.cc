@@ -94,10 +94,24 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // second reference the picture parameters cannot ask for.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncPackedHeaders:
+            // NONE, not NOT_SUPPORTED. The firmware writes SPS/PPS itself, so
+            // there is no packed header to accept, but "not supported" tells a
+            // client the attribute is unknown and GStreamer's vah264enc /
+            // vah265enc refuse to open a driver that answers that way. Value
+            // zero means "known, and no packed header is supported", which is
+            // exactly the truth.
+            attributes[i].value = encode ? VA_ENC_PACKED_HEADER_NONE : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxSlices:
+            // One slice per picture: the firmware decides the slice layout.
+            // GStreamer reads this and clamps its own slice count to it, so a
+            // NOT_SUPPORTED answer makes it compute -1.
+            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
         default:
-            // Packed headers, slice structure, ROI, quality range and tiles
-            // stay unsupported: the firmware writes the headers and decides
-            // the slice layout.
+            // Slice structure, ROI, quality range and tiles stay unsupported:
+            // the firmware decides the layout.
             attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         }
