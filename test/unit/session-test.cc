@@ -600,8 +600,11 @@ void test_import_queues_client_buffer_per_picture()
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
     CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
-    // The first picture's buffer went in before CAPTURE streamed.
-    CHECK(h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd=") < h.fake->joined_log().find("STREAMON CAPTURE"));
+    // CAPTURE streams before the first picture's buffer goes in: the kernel
+    // only clears the DRC boundary sub-state in iris_process_streamon_output,
+    // and a CAPTURE QBUF that arrives first is completed as an empty LAST
+    // instead of being handed to the firmware.
+    CHECK(h.fake->joined_log().find("STREAMON CAPTURE") < h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd="));
     h.session->wait(ta);
     CHECK(ta.completed && !ta.error && ta.frame == nullptr);
     CHECK(same_buffer(h.fake->capture_fd(0), a.fd));

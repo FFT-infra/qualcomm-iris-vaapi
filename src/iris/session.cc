@@ -264,6 +264,17 @@ void Session::configure_capture()
 
 void Session::enter_streaming()
 {
+    // CAPTURE STREAMON has to precede every CAPTURE QBUF on this path, both
+    // memories alike. The kernel keeps a DRC boundary sub-state
+    // (DRC | DRC_LAST) after the firmware PSC_LAST and clears it inside
+    // iris_process_streamon_output. A CAPTURE QBUF that reaches
+    // iris_vb2_buf_queue while those bits are still set is not handed to the
+    // firmware: the driver completes it on the spot as an empty
+    // V4L2_BUF_FLAG_LAST buffer, which makes vb2 set q->last_buffer_dequeued
+    // and turns every later CAPTURE DQBUF into -EPIPE. Queueing before
+    // STREAMON therefore loses the whole new segment; queueing after it does
+    // not. v4l2av1dec survives the same window only by luck of timing.
+    device_->stream(Queue::Capture, true);
     if (pool_.capture_memory() == CaptureMemory::Import) {
         // Pictures already submitted (the first AU, or the one that
         // announced a resolution change) wait in the backlog; the first
@@ -278,7 +289,6 @@ void Session::enter_streaming()
     } else {
         pool_.requeue_capture();
     }
-    device_->stream(Queue::Capture, true);
     source_change_ = false;
     saw_last_ = false;
     state_ = SessionState::Streaming;
