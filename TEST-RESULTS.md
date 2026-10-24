@@ -3492,9 +3492,11 @@ into it. `staged`'s memory therefore reads `stale` before the blits land and
 
 Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
 `ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `7173756` plus the
-working-tree change, build tree `build-alloc` (probe `1413ac6f9ad4…`),
-encoder node `/dev/video3` ("Iris Encoder") and render node
-`/dev/dri/renderD128`, both resolved by name.
+working-tree change (copied to the target's `~/Lab/qualcomm-iris-vaapi`,
+whose checkout is at `3cfaa7e` and was not otherwise updated), build tree
+`build-alloc` (probe `1413ac6f9ad4…`), encoder node `/dev/video3`
+("Iris Encoder") and render node `/dev/dri/renderD128`, both resolved by
+name.
 
 | Run | Fence at submit | Fence after submit | Staged access unit | Verdict |
 | --- | --- | --- | --- | --- |
