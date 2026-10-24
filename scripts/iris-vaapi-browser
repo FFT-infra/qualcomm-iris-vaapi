@@ -20,7 +20,9 @@ Chromium is built with its own native V4L2 decoder and does not use this
 driver; --browser=chromium is accepted for a separately built Chromium that
 lacks that path. The launcher passes no video-decoder feature override:
 Chromium's packaged default is the configuration this project qualifies.
-LIBVA_V4L2_VIDEO_PATH may override automatic node discovery.
+LIBVA_V4L2_VIDEO_PATH may override automatic node discovery; the encoder node
+is discovered next to it and exported as LIBVA_V4L2_ENCODER_PATH when
+present, so a sandboxed client never has to glob /dev/video*.
 IRIS_BROWSER_BIN may override browser executable discovery.
 IRIS_BROWSER_PROFILE_ROOT may override the isolated profile root.
 EOF
@@ -29,6 +31,45 @@ EOF
 fail() {
     echo "iris-vaapi-browser: $*" >&2
     exit 1
+}
+
+# The encoder node, if there is one. A display without it still decodes, so
+# an absent encoder is not an error: the driver probes it as non-fatal and
+# advertises no encode entrypoint. It is resolved and exported anyway because
+# the driver falls back to globbing /dev/video* when the variable is unset,
+# and a sandboxed process (Firefox's RDD, for one) may be denied that glob.
+# Naming both nodes is what keeps a client on this driver without weakening
+# the sandbox.
+resolve_iris_encoder() {
+    if [ -n "${LIBVA_V4L2_ENCODER_PATH:-}" ]; then
+        [ -c "$LIBVA_V4L2_ENCODER_PATH" ] \
+            || fail "LIBVA_V4L2_ENCODER_PATH is not a character device: $LIBVA_V4L2_ENCODER_PATH"
+        printf '%s\n' "$LIBVA_V4L2_ENCODER_PATH"
+        return 0
+    fi
+
+    command -v v4l2-ctl >/dev/null 2>&1 || return 0
+
+    for candidate in /dev/video*; do
+        [ -c "$candidate" ] || continue
+        # `|| true`: v4l2-ctl exits non-zero on nodes that are not simple
+        # video devices, and this script runs under set -e.
+        info=$(v4l2-ctl -d "$candidate" --info 2>/dev/null || true)
+        driver=$(printf '%s\n' "$info" \
+            | sed -n 's/^[[:space:]]*Driver name[[:space:]]*:[[:space:]]*//p' \
+            | sed -n '1p')
+        [ "$driver" = iris_driver ] || continue
+        card=$(printf '%s\n' "$info" \
+            | sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p' \
+            | sed -n '1p')
+        case "$card" in
+            *[Ee]ncoder*)
+                printf '%s\n' "$candidate"
+                return 0
+                ;;
+        esac
+    done
+    return 0
 }
 
 resolve_iris_decoder() {
@@ -136,6 +177,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 node=$(resolve_iris_decoder)
+encoder_node=$(resolve_iris_encoder || true)
 if [ "$print_node" -eq 1 ]; then
     printf '%s\n' "$node"
     exit 0
@@ -191,6 +233,16 @@ unset LIBVA_DRIVERS_PATH
 LIBVA_DRIVER_NAME=v4l2
 LIBVA_V4L2_VIDEO_PATH=$node
 export LIBVA_DRIVER_NAME LIBVA_V4L2_VIDEO_PATH
+# Both nodes names are set when the encoder exists, so the driver opens exact
+# paths instead of globbing /dev/video*. A sandboxed client that is denied the
+# glob then still reaches the driver. Empty means "no encoder node"; the
+# driver's own probe for one is non-fatal.
+if [ -n "$encoder_node" ]; then
+    LIBVA_V4L2_ENCODER_PATH=$encoder_node
+    export LIBVA_V4L2_ENCODER_PATH
+else
+    unset LIBVA_V4L2_ENCODER_PATH
+fi
 
 common_args="--ozone-platform=wayland"
 
