@@ -40,10 +40,17 @@ this repository and checks the recorded hash before `%patch`. A change to a
 patch here therefore breaks that build until the pin and the hash move with
 it.
 
-The spec's URLs pin commit `8dd655e`, which is reachable through the draft
-pull request on `phxinyang/qualcomm-iris-vaapi`, not from `main`: `main` still
-carries only `0001-*`. Force-pushing that branch is what would break the URLs,
-because the commit would then be collected.
+The URLs pin commit `5a0fcb5`, the first commit that carries all four files
+and this directory's `SHA256SUMS`. The `iris-kernel-patches-v1` tag points at
+it, and a tag does not move, so the URLs survive the deletion of any branch
+that happens to contain the commit. Pinning a commit that only a branch or a
+pull request head keeps alive is the failure to avoid: GitHub collects an
+unreachable commit, and the next kernel build fails at `spectool` with a 404
+that says nothing about the patches being fine.
+
+When a patch changes, tag a new commit and repoint the spec in the same
+change; leaving the old tag in place keeps previously built packages
+fetchable.
 
 Rebuild only the module, on the target, against the running kernel:
 
